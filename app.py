@@ -465,6 +465,27 @@ def palpluss_callback():
         return jsonify({"ok": False}), 500
 
 
+@app.route("/payment/<reference>/status", methods=["GET"])
+def payment_status(reference):
+    booking = get_booking(reference)
+    if not booking:
+        abort(404)
+
+    paid = (
+        booking["payment_status"] == "PAID"
+        and bool(booking["qr_token"])
+    )
+
+    return jsonify({
+        "status": booking["payment_status"],
+        "paid": paid,
+        "ticket_url": (
+            url_for("ticket_pdf", reference=reference)
+            if paid else None
+        )
+    })
+
+
 @app.route("/payment/<reference>", methods=["GET"])
 def payment(reference):
     booking = get_booking(reference)

@@ -6,36 +6,101 @@
     <h1>Complete your <span class="accent">booking.</span></h1>
     <p class="muted">Booking reference: <b>{{ booking.reference }}</b></p>
 </div>
+
 <div class="payment-panel">
     <div class="payment-icon">↗</div>
-    <h2>{% if booking.payment_status == "PAID" %}Payment confirmed{% else %}Complete your payment{% endif %}</h2>
-    <p>
-        {% if booking.payment_status == "PAID" %}
-            Your payment has been confirmed. Your digital ticket is ready.
-        {% else %}
-            Your booking is not yet paid. A ticket and QR code will only be issued after PalPluss independently confirms successful payment.
-        {% endif %}
-    </p>
+
+    {% if booking.payment_status == "PAID" %}
+        <h2>Payment successful!</h2>
+        <p>Your payment has been confirmed. Your digital ticket is ready.</p>
+    {% elif booking.payment_status == "PENDING" %}
+        <h2>Waiting for M-PESA confirmation</h2>
+        <p>Check your phone and complete the M-PESA payment prompt. Your ticket will be available after PalPluss confirms payment.</p>
+    {% else %}
+        <h2>Complete your payment</h2>
+        <p>Your booking is saved. Complete payment to receive your digital ticket and QR code.</p>
+    {% endif %}
+
     <div class="payment-details">
         <div><span>Customer</span><b>{{ booking.full_name }}</b></div>
         <div><span>Phone</span><b>{{ booking.phone }}</b></div>
         <div><span>Ticket category</span><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
-        <div><span>Amount due</span><b class="amount">{% if booking.category == "PRICE_PENDING" or booking.total_amount <= 0 %}Price pending{% else %}KES {{ "{:,}".format(booking.total_amount) }}{% endif %}</b></div>
-        <div><span>Payment status</span><b class="status">{{ booking.payment_status }}</b></div>
+        <div>
+            <span>Amount due</span>
+            <b class="amount">
+                {% if booking.category == "PRICE_PENDING" or booking.total_amount <= 0 %}
+                    Price pending
+                {% else %}
+                    KES {{ "{:,}".format(booking.total_amount) }}
+                {% endif %}
+            </b>
+        </div>
+        <div><span>Payment status</span><b class="status" id="payment-status">{{ booking.payment_status }}</b></div>
     </div>
+
     {% if booking.payment_status == "PAID" %}
-        <a class="btn primary full" href="{{ url_for("ticket", reference=booking.reference) }}">View your ticket →</a>
+        <a class="btn primary full" href="{{ url_for('ticket_pdf', reference=booking.reference) }}">Download Ticket (PDF) →</a>
+        <a class="back centered" href="{{ url_for('ticket', reference=booking.reference) }}">View digital ticket</a>
+
+    {% elif booking.payment_status == "PENDING" %}
+        <div id="pending-message" class="form-note">
+            <strong>Payment pending.</strong> Keep this page open. We are checking for payment confirmation automatically.
+        </div>
+        <p class="form-note">If the M-PESA prompt has not appeared, check your phone and wait. Do not pay a second time while this request is pending.</p>
+
     {% elif can_pay %}
-        <form method="POST" action="{{ url_for("palpluss_stk", reference=booking.reference) }}">
+        <form method="POST" action="{{ url_for('palpluss_stk', reference=booking.reference) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <label for="payment-phone">M-PESA phone number</label>
             <input id="payment-phone" name="phone" type="tel" value="{{ booking.phone }}" required autocomplete="tel" placeholder="07XXXXXXXX">
-            <button class="btn primary full" type="submit">Pay with M-PESA</button>
+            <button class="btn primary full" type="submit">Complete Payment</button>
         </form>
-        <p class="form-note">A PalPluss payment prompt will be sent to your phone. Only approve it if the amount and payment details are correct.</p>
+        <p class="form-note">A PalPluss STK Push will be sent to your phone. Check that the amount is correct before approving the M-PESA prompt.</p>
+
     {% else %}
         <p class="form-note">Online payment is not enabled for this booking yet. Do not send money to anyone claiming to collect payment for this booking.</p>
     {% endif %}
-    <a class="back centered" href="{{ url_for("index") }}">Return to events</a>
+
+    <a class="back centered" href="{{ url_for('index') }}">Return to events</a>
 </div>
+
+{% if booking.payment_status == "PENDING" %}
+<script>
+(() => {
+    const statusUrl = {{ url_for('payment_status', reference=booking.reference)|tojson }};
+    let checking = false;
+
+    async function checkPayment() {
+        if (checking || document.hidden) return;
+        checking = true;
+
+        try {
+            const response = await fetch(statusUrl, {
+                method: "GET",
+                cache: "no-store",
+                headers: { "Accept": "application/json" }
+            });
+
+            if (!response.ok) return;
+
+            const data = await response.json();
+
+            if (data.paid && data.ticket_url) {
+                document.getElementById("payment-status").textContent = "PAID";
+                window.location.reload();
+            } else if (data.status === "FAILED" || data.status === "REVIEW") {
+                window.location.reload();
+            }
+        } catch (error) {
+            console.error("Payment status check failed:", error);
+        } finally {
+            checking = false;
+        }
+    }
+
+    checkPayment();
+    setInterval(checkPayment, 5000);
+})();
+</script>
+{% endif %}
 {% endblock %}
