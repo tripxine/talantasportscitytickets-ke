@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}TIKETI360 Kenya{% endblock %}</title><link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}"></head><body>
 <header class="topbar"><a class="brand" href="{{ url_for('index') }}"><span class="brandmark">T</span><span>TIKETI<span class="accent">360</span><small>KENYA</small></span></a><nav><a href="{{ url_for('index') }}">Events</a><a href="{{ url_for('admin_login') }}">Event admin</a></nav></header>
-{% if payment_mode|default('DEMO') == 'DEMO' %}<div class="demo-banner">DEMO ENVIRONMENT · Payments are simulated · No real tickets or PalPluss charges</div>{% endif %}
+{% if payment_mode|default('DEMO') == 'DEMO' %}<div class="demo-banner">Ensure t secure your tickets no money will be refunded incase of loss</div>{% endif %}
 <main class="container">{% with messages=get_flashed_messages(with_categories=true) %}{% if messages %}{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}{% block content %}{% endblock %}</main>
 <footer><div class="footer-inner"><b>TIKETI360 <span class="accent">KENYA</span></b><span>Digital event access · Secure ticket verification</span><small>Independent demonstration platform. Not affiliated with Talanta Stadium or any football club.</small></div></footer>
 <script src="{{ url_for('static',filename='app.js') }}"></script></body></html>
