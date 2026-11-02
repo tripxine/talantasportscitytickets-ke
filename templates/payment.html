@@ -28,9 +28,9 @@
     {% elif can_pay %}
         <form method="POST" action="{{ url_for("palpluss_stk", reference=booking.reference) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn primary full" type="submit">Pay with M-Pesa</button>
+            <button class="btn primary full" type="submit">Pay with PalPluss</button>
         </form>
-        <p class="form-note">An M-Pesa payment prompt will be sent to your phone. Only approve it if the amount and payment details are correct.</p>
+        <p class="form-note">A PalPluss payment prompt will be sent to your phone. Only approve it if the amount and payment details are correct.</p>
     {% else %}
         <p class="form-note">Online payment is not enabled for this booking yet. Do not send money to anyone claiming to collect payment for this booking.</p>
     {% endif %}

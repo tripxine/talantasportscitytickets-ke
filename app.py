@@ -1,4 +1,6 @@
-import os, io, uuid, secrets, base64, sqlite3, json
+import os, io, uuid, secrets, base64, json
+import psycopg
+from psycopg.rows import dict_row
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -13,8 +15,8 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "change-this-secret-before-deployment")
-DB_PATH = os.getenv("DATABASE_PATH", "tiketi360.db")
-PAYMENT_MODE = "DISABLED"  # Enable only after verified PalPluss integration.
+DATABASE_URL = os.getenv("DATABASE_URL")
+PAYMENT_MODE = "DISABLED"
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000")
 
@@ -28,55 +30,40 @@ EVENT_SEED = {
 }
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured.")
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+        connect_timeout=10
+    )
 
 def init_db():
+    required_tables = (
+        "events",
+        "ticket_types",
+        "site_settings",
+        "bookings",
+        "group_members",
+        "payment_transactions"
+    )
+
     with db() as con:
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL, description TEXT, venue TEXT NOT NULL,
-            event_date TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'published',
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, reference TEXT UNIQUE NOT NULL,
-            event_id INTEGER NOT NULL, full_name TEXT NOT NULL, email TEXT NOT NULL,
-            phone TEXT NOT NULL, category TEXT NOT NULL, quantity INTEGER NOT NULL,
-            unit_price INTEGER NOT NULL, total_amount INTEGER NOT NULL,
-            payment_status TEXT NOT NULL DEFAULT 'PENDING',
-            checkout_request_id TEXT, merchant_request_id TEXT,
-            mpesa_receipt TEXT, qr_token TEXT UNIQUE, used INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(event_id) REFERENCES events(id)
-        );
-        """)
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS group_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            booking_id INTEGER NOT NULL,
-            full_name TEXT NOT NULL,
-            id_number_encrypted TEXT NOT NULL,
-            phone TEXT NOT NULL,
-            is_leader INTEGER NOT NULL DEFAULT 0,
-            entry_status TEXT NOT NULL DEFAULT 'PENDING',
-            checked_in_at TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
-        )
-        """)
-        con.execute("""
-        CREATE INDEX IF NOT EXISTS idx_group_members_booking
-        ON group_members(booking_id)
-        """)
-        exists = con.execute("SELECT id FROM events WHERE slug=?", (EVENT_SEED["slug"],)).fetchone()
-        if not exists:
-            con.execute("""INSERT INTO events(slug,name,description,venue,event_date,status,created_at)
-                VALUES(?,?,?,?,?,?,?)""",
-                (EVENT_SEED["slug"], EVENT_SEED["name"], EVENT_SEED["description"],
-                 EVENT_SEED["venue"], EVENT_SEED["event_date"], "published", now()))
+        missing = []
+        for table in required_tables:
+            result = con.execute(
+                "SELECT to_regclass(%s) AS table_name",
+                (f"public.{table}",)
+            ).fetchone()
+            if not result["table_name"]:
+                missing.append(table)
+
+        if missing:
+            raise RuntimeError(
+                "Required Neon tables are missing: " + ", ".join(missing)
+            )
+
+    print("Neon database connected. Existing application tables verified.")
 
 def id_cipher():
     key = os.getenv("ID_ENCRYPTION_KEY")
@@ -146,48 +133,6 @@ def get_booking(reference):
         return con.execute("""SELECT b.*, e.name AS event_name, e.venue, e.event_date
             FROM bookings b JOIN events e ON e.id=b.event_id WHERE b.reference=?""",
             (reference,)).fetchone()
-
-def mpesa_access_token():
-    key = os.getenv("MPESA_CONSUMER_KEY")
-    secret = os.getenv("MPESA_CONSUMER_SECRET")
-    if not key or not secret:
-        raise RuntimeError("M-PESA credentials are not configured.")
-    host = "https://sandbox.safaricom.co.ke"
-    response = requests.get(host + "/oauth/v1/generate?grant_type=client_credentials",
-        auth=(key, secret), timeout=20)
-    response.raise_for_status()
-    return response.json()["access_token"]
-
-def start_stk_push(booking):
-    required = ["MPESA_SHORTCODE", "MPESA_PASSKEY", "MPESA_CALLBACK_URL"]
-    if any(not os.getenv(x) for x in required):
-        raise RuntimeError("Set MPESA_SHORTCODE, MPESA_PASSKEY and MPESA_CALLBACK_URL in .env.")
-    token = mpesa_access_token()
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    shortcode = os.getenv("MPESA_SHORTCODE")
-    password = base64.b64encode((shortcode + os.getenv("MPESA_PASSKEY") + timestamp).encode()).decode()
-    phone = booking["phone"]
-    if phone.startswith("+"): phone = phone[1:]
-    if phone.startswith("0"): phone = "254" + phone[1:]
-    payload = {
-        "BusinessShortCode": shortcode, "Password": password, "Timestamp": timestamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": int(booking["total_amount"]), "PartyA": phone,
-        "PartyB": shortcode, "PhoneNumber": phone,
-        "CallBackURL": os.getenv("MPESA_CALLBACK_URL"),
-        "AccountReference": booking["reference"][:12],
-        "TransactionDesc": "TIKETI360 ticket purchase"
-    }
-    response = requests.post("https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
-        json=payload, headers={"Authorization": "Bearer " + token}, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    if data.get("ResponseCode") != "0":
-        raise RuntimeError(data.get("ResponseDescription", "STK request was not accepted."))
-    with db() as con:
-        con.execute("UPDATE bookings SET checkout_request_id=?, merchant_request_id=? WHERE reference=?",
-            (data.get("CheckoutRequestID"), data.get("MerchantRequestID"), booking["reference"]))
-    return data
 
 def qr_data_uri(value):
     img = qrcode.make(value)
@@ -334,14 +279,6 @@ def payment(reference):
         csrf_token=checkout_csrf_token()
     )
 
-
-@app.route("/api/mpesa/callback", methods=["POST"])
-def mpesa_callback():
-    # Legacy unauthenticated callback disabled.
-    return jsonify({
-        "ok": False,
-        "message": "Payment verification is not configured."
-    }), 410
 
 @app.route("/ticket/<reference>")
 def ticket(reference):
