@@ -5,3 +5,5 @@ qrcode[pil]>=7.4
 reportlab>=4.0
 
 cryptography>=42.0
+
+psycopg[binary]>=3.2,<4

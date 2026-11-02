@@ -106,7 +106,7 @@ def admin_required(fn):
 def get_event(slug):
     with db() as con:
         return con.execute(
-            "SELECT * FROM events WHERE slug=? AND status='published'",
+            "SELECT * FROM events WHERE slug=%s AND status='published'",
             (slug,)
         ).fetchone()
 
@@ -116,7 +116,7 @@ def get_ticket_types(event_id):
         return con.execute("""
             SELECT code, name, price
             FROM ticket_types
-            WHERE event_id=? AND is_active=1 AND price IS NOT NULL
+            WHERE event_id=%s AND is_active IS TRUE AND price IS NOT NULL
             ORDER BY id
         """, (event_id,)).fetchall()
 
@@ -131,7 +131,7 @@ def get_primary_event_slug():
 def get_booking(reference):
     with db() as con:
         return con.execute("""SELECT b.*, e.name AS event_name, e.venue, e.event_date
-            FROM bookings b JOIN events e ON e.id=b.event_id WHERE b.reference=?""",
+            FROM bookings b JOIN events e ON e.id=b.event_id WHERE b.reference=%s""",
             (reference,)).fetchone()
 
 def qr_data_uri(value):
@@ -236,19 +236,20 @@ def book(slug):
                 INSERT INTO bookings(
                     reference, event_id, full_name, email, phone, category,
                     quantity, unit_price, total_amount, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
             """, (
                 reference, event["id"], leader_name, email, contact_phone,
                 category, quantity, unit_price, total_amount, now()
             ))
 
-            booking_id = cursor.lastrowid
+            booking_id = cursor.fetchone()["id"]
             for i, (name, id_number, member_phone) in enumerate(members):
                 con.execute("""
                     INSERT INTO group_members(
                         booking_id, full_name, id_number_encrypted, phone,
                         is_leader, entry_status, created_at
-                    ) VALUES(?,?,?,?,?,?,?)
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     booking_id, name, encrypt_id_number(id_number),
                     member_phone, int(i == leader_index), "PENDING", now()
@@ -292,7 +293,7 @@ def ticket(reference):
         members = con.execute("""
             SELECT full_name, is_leader, entry_status
             FROM group_members
-            WHERE booking_id=?
+            WHERE booking_id=%s
             ORDER BY id
         """, (booking["id"],)).fetchall()
 
@@ -347,7 +348,7 @@ def verify_ticket(token):
             SELECT b.*, e.name AS event_name, e.venue
             FROM bookings b
             JOIN events e ON e.id = b.event_id
-            WHERE b.qr_token = ?
+            WHERE b.qr_token = %s
         """, (token,)).fetchone()
 
         members = []
@@ -355,7 +356,7 @@ def verify_ticket(token):
             members = con.execute("""
                 SELECT full_name, is_leader, entry_status
                 FROM group_members
-                WHERE booking_id = ?
+                WHERE booking_id = %s
                 ORDER BY id
             """, (b["id"],)).fetchall()
 
@@ -395,7 +396,7 @@ def scan_ticket():
 
     with db() as con:
         booking = con.execute(
-            "SELECT * FROM bookings WHERE qr_token=?", (token,)
+            "SELECT * FROM bookings WHERE qr_token=%s", (token,)
         ).fetchone()
 
         if not booking:
@@ -407,7 +408,7 @@ def scan_ticket():
         members = con.execute("""
             SELECT id, full_name, is_leader, entry_status
             FROM group_members
-            WHERE booking_id=?
+            WHERE booking_id=%s
             ORDER BY id
         """, (booking["id"],)).fetchall()
 
@@ -431,7 +432,7 @@ def scan_ticket():
 
             if action == "checkin":
                 con.execute(
-                    "UPDATE bookings SET used=1 WHERE id=? AND used=0",
+                    "UPDATE bookings SET used=1 WHERE id=%s AND used=0",
                     (booking["id"],)
                 )
                 return jsonify({
@@ -483,7 +484,7 @@ def scan_ticket():
             member = con.execute("""
                 SELECT id, full_name, entry_status
                 FROM group_members
-                WHERE id=? AND booking_id=?
+                WHERE id=%s AND booking_id=%s
             """, (member_id, booking["id"])).fetchone()
 
             if not member:
@@ -500,19 +501,19 @@ def scan_ticket():
 
             con.execute("""
                 UPDATE group_members
-                SET entry_status='CHECKED_IN', checked_in_at=?
-                WHERE id=? AND booking_id=? AND entry_status='PENDING'
+                SET entry_status='CHECKED_IN', checked_in_at=%s
+                WHERE id=%s AND booking_id=%s AND entry_status='PENDING'
             """, (now(), member_id, booking["id"]))
 
             remaining = con.execute("""
                 SELECT COUNT(*) AS total
                 FROM group_members
-                WHERE booking_id=? AND entry_status!='CHECKED_IN'
+                WHERE booking_id=%s AND entry_status!='CHECKED_IN'
             """, (booking["id"],)).fetchone()["total"]
 
             if remaining == 0:
                 con.execute(
-                    "UPDATE bookings SET used=1 WHERE id=?",
+                    "UPDATE bookings SET used=1 WHERE id=%s",
                     (booking["id"],)
                 )
 
@@ -567,7 +568,7 @@ def create_event():
         slug=uuid.uuid4().hex[:12]
         with db() as con:
             con.execute("""INSERT INTO events(slug,name,description,venue,event_date,status,created_at)
-                VALUES(?,?,?,?,?,'published',?)""",(slug,name,description,venue,date,now()))
+                VALUES(%s,%s,%s,%s,%s,'published',%s)""",(slug,name,description,venue,date,now()))
         flash("Event created.","success")
     return redirect(url_for("admin"))
 
@@ -575,7 +576,7 @@ def create_event():
 @admin_required
 def toggle_event(event_id):
     with db() as con:
-        con.execute("UPDATE events SET status=CASE WHEN status='published' THEN 'hidden' ELSE 'published' END WHERE id=?",(event_id,))
+        con.execute("UPDATE events SET status=CASE WHEN status='published' THEN 'hidden' ELSE 'published' END WHERE id=%s",(event_id,))
     return redirect(url_for("admin"))
 
 @app.route("/health")
