@@ -35,9 +35,15 @@ class PalPlussClient:
             )
             response.raise_for_status()
             payload = response.json()
-            if not isinstance(payload, dict) or payload.get("success") is False:
-                raise PalPlussError("PalPluss rejected the request or returned an unexpected response.")
-            return payload
+            if (
+                not isinstance(payload, dict)
+                or payload.get("success") is not True
+                or not isinstance(payload.get("data"), dict)
+            ):
+                raise PalPlussError(
+                    "PalPluss returned an unsuccessful or unexpected response."
+                )
+            return payload["data"]
         except requests.RequestException as exc:
             raise PalPlussError(
                 "PalPluss request failed. Check connectivity and provider configuration."

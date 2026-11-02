@@ -28,7 +28,9 @@
     {% elif can_pay %}
         <form method="POST" action="{{ url_for("palpluss_stk", reference=booking.reference) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn primary full" type="submit">Pay with PalPluss</button>
+            <label for="payment-phone">M-PESA phone number</label>
+            <input id="payment-phone" name="phone" type="tel" value="{{ booking.phone }}" required autocomplete="tel" placeholder="07XXXXXXXX">
+            <button class="btn primary full" type="submit">Pay with M-PESA</button>
         </form>
         <p class="form-note">A PalPluss payment prompt will be sent to your phone. Only approve it if the amount and payment details are correct.</p>
     {% else %}

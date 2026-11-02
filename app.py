@@ -11,12 +11,13 @@ import qrcode
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, jsonify, abort
+from palpluss import PalPlussClient, PalPlussError
 
 load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "change-this-secret-before-deployment")
 DATABASE_URL = os.getenv("DATABASE_URL")
-PAYMENT_MODE = "DISABLED"
+PAYMENT_MODE = os.getenv("PAYMENT_MODE", "DISABLED").strip().upper()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000")
 
@@ -226,7 +227,7 @@ def book(slug):
             return redirect(url_for("book", slug=slug))
 
         unit_price = prices.get(category, 0)
-        discount = 100 * (quantity - 1)
+        discount = 200 * (quantity - 1)
         total_amount = max(0, unit_price * quantity - discount)
         leader_name = members[leader_index][0]
         reference = "TK" + uuid.uuid4().hex[:10].upper()
@@ -235,12 +236,12 @@ def book(slug):
             cursor = con.execute("""
                 INSERT INTO bookings(
                     reference, event_id, full_name, email, phone, category,
-                    quantity, unit_price, total_amount, created_at
-                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    quantity, unit_price, discount_amount, total_amount, created_at
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (
                 reference, event["id"], leader_name, email, contact_phone,
-                category, quantity, unit_price, total_amount, now()
+                category, quantity, unit_price, discount, total_amount, now()
             ))
 
             booking_id = cursor.fetchone()["id"]
@@ -252,7 +253,7 @@ def book(slug):
                     ) VALUES(%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     booking_id, name, encrypt_id_number(id_number),
-                    member_phone, int(i == leader_index), "PENDING", now()
+                    member_phone, i == leader_index, "PENDING", now()
                 ))
 
         flash("Booking details saved.", "success")
@@ -265,6 +266,205 @@ def book(slug):
         booking_enabled=booking_enabled
     )
 
+
+@app.route("/payment/<reference>/palpluss", methods=["POST"])
+def palpluss_stk(reference):
+    booking = get_booking(reference)
+    if not booking:
+        abort(404)
+    if not validate_checkout_csrf(request.form.get("csrf_token")):
+        abort(400)
+    if PAYMENT_MODE != "PALPLUSS" or os.getenv("PALPLUSS_LIVE_ENABLED", "0") != "1":
+        flash("Online payments are not enabled.", "error")
+        return redirect(url_for("payment", reference=reference))
+    if booking["payment_status"] == "PAID":
+        return redirect(url_for("ticket", reference=reference))
+
+    amount = int(booking["total_amount"] or 0)
+    if amount < 1:
+        flash("This booking has no payable amount.", "error")
+        return redirect(url_for("payment", reference=reference))
+
+    phone = request.form.get("phone", booking["phone"]).strip()
+    callback_url = os.getenv("PALPLUSS_CALLBACK_URL", "").strip()
+    if not callback_url:
+        flash("Payment callback URL is not configured.", "error")
+        return redirect(url_for("payment", reference=reference))
+
+    with db() as con:
+        pending = con.execute("""
+            SELECT id FROM payment_transactions
+            WHERE booking_id=%s AND provider='PALPLUSS'
+              AND status IN ('PENDING','PROCESSING')
+            LIMIT 1
+        """, (booking["id"],)).fetchone()
+    if pending:
+        flash("A payment request is already pending. Check your phone.", "warning")
+        return redirect(url_for("payment", reference=reference))
+
+    try:
+        result = PalPlussClient().initiate_stk(
+            amount, phone, reference, callback_url
+        )
+        txid = result.get("transactionId") or result.get("transaction_id")
+        request_id = result.get("requestId") or result.get("request_id")
+        if not txid:
+            raise PalPlussError("PalPluss did not return a transaction ID.")
+
+        with db() as con:
+            con.execute("""
+                INSERT INTO payment_transactions(
+                    booking_id, provider, provider_transaction_id, status,
+                    amount, currency, phone, request_id, created_at, updated_at
+                ) VALUES(%s,'PALPLUSS',%s,'PENDING',%s,'KES',%s,%s,%s,%s)
+            """, (booking["id"], str(txid), amount, phone,
+                  str(request_id) if request_id else None, now(), now()))
+            con.execute("""
+                UPDATE bookings
+                SET phone=%s, payment_status='PENDING',
+                    checkout_request_id=%s, updated_at=%s
+                WHERE id=%s AND payment_status!='PAID'
+            """, (phone, str(request_id or txid), now(), booking["id"]))
+        flash("Payment prompt requested. Check your phone.", "success")
+    except PalPlussError as exc:
+        flash(str(exc), "error")
+    except Exception:
+        app.logger.exception("PalPluss STK initiation failed")
+        flash("Payment could not be started. Please contact the event administrator.", "error")
+
+    return redirect(url_for("payment", reference=reference))
+
+
+@app.route("/payment/palpluss/callback", methods=["POST"])
+def palpluss_callback():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False}), 400
+
+    root = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    tx = root.get("transaction") if isinstance(root.get("transaction"), dict) else root
+    txid = tx.get("id") or tx.get("transaction_id") or tx.get("transactionId")
+    if not txid:
+        return jsonify({"ok": False, "message": "Transaction ID missing."}), 400
+
+    txid = str(txid)
+    event_type = str(payload.get("event") or payload.get("type") or "transaction.update")
+    event_id = str(payload.get("event_id") or payload.get("eventId") or f"{txid}:{event_type}")
+
+    try:
+        with db() as con:
+            con.execute("""
+                INSERT INTO payment_webhook_events(
+                    provider, provider_event_id, provider_transaction_id,
+                    event_type, processing_status, payload, received_at
+                ) VALUES('PALPLUSS',%s,%s,%s,'RECEIVED',%s::jsonb,%s)
+                ON CONFLICT(provider, provider_event_id) DO NOTHING
+            """, (event_id, txid, event_type, json.dumps(payload), now()))
+
+        # Callback contents are untrusted; independently query PalPluss.
+        verified = PalPlussClient().get_transaction(txid)
+        status = str(verified.get("status") or "").upper()
+        verified_id = str(verified.get("transaction_id") or verified.get("transactionId") or txid)
+        external_ref = str(
+            verified.get("external_reference")
+            or verified.get("account_reference")
+            or verified.get("accountReference")
+            or ""
+        )
+        phone = str(verified.get("phone_number") or verified.get("phone") or "")
+        phone = phone.replace(" ", "").replace("-", "").lstrip("+")
+        if phone.startswith("0"):
+            phone = "254" + phone[1:]
+        amount = int(float(verified.get("amount") or 0))
+        currency = str(verified.get("currency") or "").upper()
+        receipt = verified.get("mpesa_receipt") or verified.get("receipt")
+
+        with db() as con:
+            record = con.execute("""
+                SELECT * FROM payment_transactions
+                WHERE provider='PALPLUSS' AND provider_transaction_id=%s
+                FOR UPDATE
+            """, (txid,)).fetchone()
+            if not record:
+                raise PalPlussError("No matching local payment record.")
+
+            booking = con.execute(
+                "SELECT * FROM bookings WHERE id=%s FOR UPDATE",
+                (record["booking_id"],)
+            ).fetchone()
+            if not booking:
+                raise PalPlussError("Booking not found.")
+
+            expected_phone = str(record["phone"]).replace(" ", "").replace("-", "").lstrip("+")
+            if expected_phone.startswith("0"):
+                expected_phone = "254" + expected_phone[1:]
+
+            valid = (
+                verified_id == txid
+                and external_ref == booking["reference"]
+                and amount == int(booking["total_amount"])
+                and amount == int(record["amount"])
+                and currency == "KES"
+                and phone == expected_phone
+            )
+            if not valid:
+                con.execute("""
+                    UPDATE payment_transactions
+                    SET status='REVIEW', failure_reason=%s, updated_at=%s
+                    WHERE id=%s
+                """, ("Provider details did not match booking.", now(), record["id"]))
+                con.execute("""
+                    UPDATE payment_webhook_events
+                    SET processing_status='REVIEW', processed_at=%s
+                    WHERE provider='PALPLUSS' AND provider_event_id=%s
+                """, (now(), event_id))
+                return jsonify({"ok": False, "message": "Manual review required."}), 202
+
+            if status in ("SUCCESS", "COMPLETED"):
+                token = booking["qr_token"] or secrets.token_urlsafe(32)
+                con.execute("""
+                    UPDATE bookings
+                    SET payment_status='PAID', qr_token=%s,
+                        provider_receipt=%s, updated_at=%s
+                    WHERE id=%s
+                """, (token, receipt, now(), booking["id"]))
+                con.execute("""
+                    INSERT INTO tickets(
+                        booking_id, ticket_number, qr_token, status, issued_at
+                    ) VALUES(%s,%s,%s,'ACTIVE',%s)
+                    ON CONFLICT(booking_id) DO NOTHING
+                """, (booking["id"], "TKT" + booking["reference"], token, now()))
+                final_status = "SUCCESS"
+            elif status in ("FAILED", "CANCELLED", "REVERSED", "EXPIRED"):
+                if booking["payment_status"] != "PAID":
+                    con.execute("""
+                        UPDATE bookings SET payment_status='FAILED', updated_at=%s
+                        WHERE id=%s
+                    """, (now(), booking["id"]))
+                final_status = status
+            else:
+                final_status = "PENDING" if status in ("PENDING", "PROCESSING") else "REVIEW"
+
+            con.execute("""
+                UPDATE payment_transactions
+                SET status=%s, provider_receipt=%s, updated_at=%s
+                WHERE id=%s
+            """, (final_status, receipt, now(), record["id"]))
+            con.execute("""
+                UPDATE payment_webhook_events
+                SET processing_status=%s, processed_at=%s
+                WHERE provider='PALPLUSS' AND provider_event_id=%s
+            """, (final_status, now(), event_id))
+
+        return jsonify({"ok": True}), 200
+    except PalPlussError:
+        app.logger.exception("PalPluss callback verification failed")
+        return jsonify({"ok": False, "message": "Transaction not verified."}), 202
+    except Exception:
+        app.logger.exception("PalPluss callback processing failed")
+        return jsonify({"ok": False}), 500
+
+
 @app.route("/payment/<reference>", methods=["GET"])
 def payment(reference):
     booking = get_booking(reference)
@@ -276,7 +476,12 @@ def payment(reference):
         "payment.html",
         booking=booking,
         payment_mode=PAYMENT_MODE,
-        can_pay=False,
+        can_pay=(
+            PAYMENT_MODE == "PALPLUSS"
+            and os.getenv("PALPLUSS_LIVE_ENABLED", "0") == "1"
+            and booking["payment_status"] not in ("PAID", "PENDING")
+            and int(booking["total_amount"] or 0) > 0
+        ),
         csrf_token=checkout_csrf_token()
     )
 
@@ -432,7 +637,7 @@ def scan_ticket():
 
             if action == "checkin":
                 con.execute(
-                    "UPDATE bookings SET used=1 WHERE id=%s AND used=0",
+                    "UPDATE bookings SET used=TRUE WHERE id=%s AND used=FALSE",
                     (booking["id"],)
                 )
                 return jsonify({
@@ -513,7 +718,7 @@ def scan_ticket():
 
             if remaining == 0:
                 con.execute(
-                    "UPDATE bookings SET used=1 WHERE id=%s",
+                    "UPDATE bookings SET used=TRUE WHERE id=%s",
                     (booking["id"],)
                 )
 
