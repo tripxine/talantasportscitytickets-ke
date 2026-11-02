@@ -236,8 +236,8 @@ def book(slug):
             cursor = con.execute("""
                 INSERT INTO bookings(
                     reference, event_id, full_name, email, phone, category,
-                    quantity, unit_price, discount_amount, total_amount, created_at
-                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    quantity, unit_price, discount_amount, total_amount, payment_status, created_at
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'UNPAID',%s)
                 RETURNING id
             """, (
                 reference, event["id"], leader_name, email, contact_phone,
@@ -272,13 +272,13 @@ def palpluss_stk(reference):
     booking = get_booking(reference)
     if not booking:
         abort(404)
+
     if not validate_checkout_csrf(request.form.get("csrf_token")):
         abort(400)
+
     if PAYMENT_MODE != "PALPLUSS" or os.getenv("PALPLUSS_LIVE_ENABLED", "0") != "1":
         flash("Online payments are not enabled.", "error")
         return redirect(url_for("payment", reference=reference))
-    if booking["payment_status"] == "PAID":
-        return redirect(url_for("ticket", reference=reference))
 
     amount = int(booking["total_amount"] or 0)
     if amount < 1:
@@ -287,50 +287,118 @@ def palpluss_stk(reference):
 
     phone = request.form.get("phone", booking["phone"]).strip()
     callback_url = os.getenv("PALPLUSS_CALLBACK_URL", "").strip()
+
     if not callback_url:
         flash("Payment callback URL is not configured.", "error")
         return redirect(url_for("payment", reference=reference))
 
-    with db() as con:
-        pending = con.execute("""
-            SELECT id FROM payment_transactions
-            WHERE booking_id=%s AND provider='PALPLUSS'
-              AND status IN ('PENDING','PROCESSING')
-            LIMIT 1
-        """, (booking["id"],)).fetchone()
-    if pending:
-        flash("A payment request is already pending. Check your phone.", "warning")
-        return redirect(url_for("payment", reference=reference))
-
     try:
-        result = PalPlussClient().initiate_stk(
-            amount, phone, reference, callback_url
-        )
-        txid = result.get("transactionId") or result.get("transaction_id")
-        request_id = result.get("requestId") or result.get("request_id")
-        if not txid:
-            raise PalPlussError("PalPluss did not return a transaction ID.")
-
+        # Lock the booking before checking or initiating payment.
+        # Concurrent requests for this booking must wait for this transaction.
         with db() as con:
+            locked_booking = con.execute("""
+                SELECT * FROM bookings
+                WHERE id=%s
+                FOR UPDATE
+            """, (booking["id"],)).fetchone()
+
+            if not locked_booking:
+                abort(404)
+
+            if locked_booking["payment_status"] == "PAID":
+                return redirect(url_for("ticket", reference=reference))
+
+            if locked_booking["payment_status"] not in ("UNPAID", "FAILED"):
+                flash(
+                    "This booking cannot start another payment while its status is being checked.",
+                    "warning"
+                )
+                return redirect(url_for("payment", reference=reference))
+
+            if int(locked_booking["total_amount"] or 0) != amount:
+                flash("Booking amount changed. Please reload the confirmation page.", "error")
+                return redirect(url_for("payment", reference=reference))
+
+            pending = con.execute("""
+                SELECT id FROM payment_transactions
+                WHERE booking_id=%s
+                  AND provider='PALPLUSS'
+                  AND status IN ('PENDING','PROCESSING','INITIATING')
+                LIMIT 1
+            """, (locked_booking["id"],)).fetchone()
+
+            if pending or locked_booking["payment_status"] == "PENDING":
+                flash(
+                    "A payment request is already pending. Check your phone. Do not pay again.",
+                    "warning"
+                )
+                return redirect(url_for("payment", reference=reference))
+
+            # The provider call happens while the booking row is locked.
+            # No second request for this booking can pass the check concurrently.
+            result = PalPlussClient().initiate_stk(
+                amount, phone, reference, callback_url
+            )
+
+            if not isinstance(result, dict):
+                raise PalPlussError("PalPluss returned an unexpected payment response.")
+
+            txid = result.get("transactionId") or result.get("transaction_id")
+            request_id = result.get("requestId") or result.get("request_id")
+
+            if not txid:
+                raise PalPlussError(
+                    "PalPluss did not return a transaction ID. Contact the administrator before retrying."
+                )
+
             con.execute("""
                 INSERT INTO payment_transactions(
                     booking_id, provider, provider_transaction_id, status,
                     amount, currency, phone, request_id, created_at, updated_at
                 ) VALUES(%s,'PALPLUSS',%s,'PENDING',%s,'KES',%s,%s,%s,%s)
-            """, (booking["id"], str(txid), amount, phone,
-                  str(request_id) if request_id else None, now(), now()))
-            con.execute("""
+            """, (
+                locked_booking["id"],
+                str(txid),
+                amount,
+                phone,
+                str(request_id) if request_id else None,
+                now(),
+                now()
+            ))
+
+            updated = con.execute("""
                 UPDATE bookings
-                SET phone=%s, payment_status='PENDING',
-                    checkout_request_id=%s, updated_at=%s
-                WHERE id=%s AND payment_status!='PAID'
-            """, (phone, str(request_id or txid), now(), booking["id"]))
+                SET phone=%s,
+                    payment_status='PENDING',
+                    checkout_request_id=%s,
+                    updated_at=%s
+                WHERE id=%s
+                  AND payment_status <> 'PAID'
+                RETURNING id
+            """, (
+                phone,
+                str(request_id or txid),
+                now(),
+                locked_booking["id"]
+            )).fetchone()
+
+            if not updated:
+                raise RuntimeError("Booking payment status could not be updated.")
+
         flash("Payment prompt requested. Check your phone.", "success")
+
     except PalPlussError as exc:
         flash(str(exc), "error")
+
     except Exception:
-        app.logger.exception("PalPluss STK initiation failed")
-        flash("Payment could not be started. Please contact the event administrator.", "error")
+        app.logger.exception(
+            "PalPluss STK initiation or local transaction recording failed for booking %s",
+            reference
+        )
+        flash(
+            "Payment processing needs attention. Do not retry if you received an M-PESA prompt. Contact the event administrator.",
+            "error"
+        )
 
     return redirect(url_for("payment", reference=reference))
 
@@ -435,10 +503,23 @@ def palpluss_callback():
                     ON CONFLICT(booking_id) DO NOTHING
                 """, (booking["id"], "TKT" + booking["reference"], token, now()))
                 final_status = "SUCCESS"
-            elif status in ("FAILED", "CANCELLED", "REVERSED", "EXPIRED"):
+            elif status == "REVERSED":
+                # A confirmed reversal must revoke access to the digital ticket.
+                con.execute("""
+                    UPDATE bookings
+                    SET payment_status='REVERSED',
+                        qr_token=NULL,
+                        provider_receipt=NULL,
+                        updated_at=%s
+                    WHERE id=%s
+                """, (now(), booking["id"]))
+                final_status = "REVERSED"
+
+            elif status in ("FAILED", "CANCELLED", "EXPIRED"):
                 if booking["payment_status"] != "PAID":
                     con.execute("""
-                        UPDATE bookings SET payment_status='FAILED', updated_at=%s
+                        UPDATE bookings
+                        SET payment_status='FAILED', updated_at=%s
                         WHERE id=%s
                     """, (now(), booking["id"]))
                 final_status = status
@@ -476,7 +557,7 @@ def payment_status(reference):
         and bool(booking["qr_token"])
     )
 
-    return jsonify({
+    response = jsonify({
         "status": booking["payment_status"],
         "paid": paid,
         "ticket_url": (
@@ -484,6 +565,9 @@ def payment_status(reference):
             if paid else None
         )
     })
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.route("/payment/<reference>", methods=["GET"])
@@ -509,7 +593,7 @@ def payment(reference):
         can_pay=(
             PAYMENT_MODE == "PALPLUSS"
             and os.getenv("PALPLUSS_LIVE_ENABLED", "0") == "1"
-            and booking["payment_status"] not in ("PAID", "PENDING")
+            and booking["payment_status"] in ("UNPAID", "FAILED")
             and int(booking["total_amount"] or 0) > 0
         ),
         csrf_token=checkout_csrf_token()
@@ -629,15 +713,21 @@ def scan_ticket():
     if not token:
         return jsonify({"ok": False, "message": "QR token is required."}), 400
 
+    if action not in ("lookup", "checkin"):
+        return jsonify({"ok": False, "message": "Unknown scanner action."}), 400
+
     with db() as con:
-        booking = con.execute(
-            "SELECT * FROM bookings WHERE qr_token=%s", (token,)
-        ).fetchone()
+        # Serialize scans for this booking to prevent simultaneous entry approvals.
+        booking = con.execute("""
+            SELECT * FROM bookings
+            WHERE qr_token=%s
+            FOR UPDATE
+        """, (token,)).fetchone()
 
         if not booking:
             return jsonify({"ok": False, "message": "Invalid ticket."}), 404
 
-        if booking["payment_status"] != "PAID":
+        if booking["payment_status"] != "PAID" or not booking["qr_token"]:
             return jsonify({"ok": False, "message": "Payment not confirmed."}), 403
 
         members = con.execute("""
@@ -645,9 +735,10 @@ def scan_ticket():
             FROM group_members
             WHERE booking_id=%s
             ORDER BY id
+            FOR UPDATE
         """, (booking["id"],)).fetchall()
 
-        # Historical single tickets: lookup must not consume entry.
+        # Legacy single-attendee bookings.
         if not members:
             if booking["used"]:
                 return jsonify({
@@ -665,23 +756,26 @@ def scan_ticket():
                     "message": "Valid ticket. Confirm check-in to approve entry."
                 })
 
-            if action == "checkin":
-                con.execute(
-                    "UPDATE bookings SET used=TRUE WHERE id=%s AND used=FALSE",
-                    (booking["id"],)
-                )
+            updated = con.execute("""
+                UPDATE bookings
+                SET used=TRUE, updated_at=%s
+                WHERE id=%s AND used=FALSE AND payment_status='PAID'
+                RETURNING id
+            """, (now(), booking["id"])).fetchone()
+
+            if not updated:
                 return jsonify({
-                    "ok": True,
-                    "legacy": True,
-                    "message": "ENTRY APPROVED",
-                    "name": booking["full_name"],
-                    "reference": booking["reference"]
-                })
+                    "ok": False,
+                    "message": "Ticket has already been scanned or is no longer valid."
+                }), 409
 
             return jsonify({
-                "ok": False,
-                "message": "Unknown scanner action."
-            }), 400
+                "ok": True,
+                "legacy": True,
+                "message": "ENTRY APPROVED",
+                "name": booking["full_name"],
+                "reference": booking["reference"]
+            })
 
         if action == "lookup":
             member_list = [{
@@ -707,61 +801,68 @@ def scan_ticket():
                 "remaining": len(members) - checked_in
             })
 
-        if action == "checkin":
-            try:
-                member_id = int(data.get("member_id", 0))
-            except (TypeError, ValueError):
-                return jsonify({
-                    "ok": False,
-                    "message": "Select a valid group member."
-                }), 400
-
-            member = con.execute("""
-                SELECT id, full_name, entry_status
-                FROM group_members
-                WHERE id=%s AND booking_id=%s
-            """, (member_id, booking["id"])).fetchone()
-
-            if not member:
-                return jsonify({
-                    "ok": False,
-                    "message": "Member does not belong to this booking."
-                }), 404
-
-            if member["entry_status"] == "CHECKED_IN":
-                return jsonify({
-                    "ok": False,
-                    "message": "This attendee has already checked in."
-                }), 409
-
-            con.execute("""
-                UPDATE group_members
-                SET entry_status='CHECKED_IN', checked_in_at=%s
-                WHERE id=%s AND booking_id=%s AND entry_status='PENDING'
-            """, (now(), member_id, booking["id"]))
-
-            remaining = con.execute("""
-                SELECT COUNT(*) AS total
-                FROM group_members
-                WHERE booking_id=%s AND entry_status!='CHECKED_IN'
-            """, (booking["id"],)).fetchone()["total"]
-
-            if remaining == 0:
-                con.execute(
-                    "UPDATE bookings SET used=TRUE WHERE id=%s",
-                    (booking["id"],)
-                )
-
+        try:
+            member_id = int(data.get("member_id", 0))
+        except (TypeError, ValueError):
             return jsonify({
-                "ok": True,
-                "message": "ENTRY APPROVED",
-                "name": member["full_name"],
-                "reference": booking["reference"],
-                "remaining": remaining,
-                "group_complete": remaining == 0
-            })
+                "ok": False,
+                "message": "Select a valid group member."
+            }), 400
 
-        return jsonify({"ok": False, "message": "Unknown scanner action."}), 400
+        member = con.execute("""
+            SELECT id, full_name, entry_status
+            FROM group_members
+            WHERE id=%s AND booking_id=%s
+            FOR UPDATE
+        """, (member_id, booking["id"])).fetchone()
+
+        if not member:
+            return jsonify({
+                "ok": False,
+                "message": "Member does not belong to this booking."
+            }), 404
+
+        if member["entry_status"] == "CHECKED_IN":
+            return jsonify({
+                "ok": False,
+                "message": "This attendee has already checked in."
+            }), 409
+
+        updated = con.execute("""
+            UPDATE group_members
+            SET entry_status='CHECKED_IN', checked_in_at=%s
+            WHERE id=%s
+              AND booking_id=%s
+              AND entry_status='PENDING'
+            RETURNING id
+        """, (now(), member_id, booking["id"])).fetchone()
+
+        if not updated:
+            return jsonify({
+                "ok": False,
+                "message": "Check-in was not recorded. Refresh and try again."
+            }), 409
+
+        remaining = con.execute("""
+            SELECT COUNT(*) AS total
+            FROM group_members
+            WHERE booking_id=%s AND entry_status!='CHECKED_IN'
+        """, (booking["id"],)).fetchone()["total"]
+
+        if remaining == 0:
+            con.execute("""
+                UPDATE bookings SET used=TRUE, updated_at=%s
+                WHERE id=%s
+            """, (now(), booking["id"]))
+
+        return jsonify({
+            "ok": True,
+            "message": "ENTRY APPROVED",
+            "name": member["full_name"],
+            "reference": booking["reference"],
+            "remaining": remaining,
+            "group_complete": remaining == 0
+        })
 
 
 @app.route("/admin", methods=["GET"])
