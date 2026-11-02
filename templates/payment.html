@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Payment | TIKETI360{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div class="eyebrow">CHECKOUT</div>
+    <h1>Complete your <span class="accent">booking.</span></h1>
+    <p class="muted">Booking reference: <b>{{ booking.reference }}</b></p>
+</div>
+<div class="payment-panel">
+    <div class="payment-icon">↗</div>
+    <h2>{% if booking.payment_status == "PAID" %}Payment confirmed{% else %}Complete your payment{% endif %}</h2>
+    <p>
+        {% if booking.payment_status == "PAID" %}
+            Your payment has been confirmed. Your digital ticket is ready.
+        {% else %}
+            Your booking is not yet paid. A ticket and QR code will only be issued after PalPluss independently confirms successful payment.
+        {% endif %}
+    </p>
+    <div class="payment-details">
+        <div><span>Customer</span><b>{{ booking.full_name }}</b></div>
+        <div><span>Phone</span><b>{{ booking.phone }}</b></div>
+        <div><span>Ticket category</span><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
+        <div><span>Amount due</span><b class="amount">{% if booking.category == "PRICE_PENDING" or booking.total_amount <= 0 %}Price pending{% else %}KES {{ "{:,}".format(booking.total_amount) }}{% endif %}</b></div>
+        <div><span>Payment status</span><b class="status">{{ booking.payment_status }}</b></div>
+    </div>
+    {% if booking.payment_status == "PAID" %}
+        <a class="btn primary full" href="{{ url_for("ticket", reference=booking.reference) }}">View your ticket →</a>
+    {% elif can_pay %}
+        <form method="POST" action="{{ url_for("palpluss_stk", reference=booking.reference) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn primary full" type="submit">Pay with M-Pesa</button>
+        </form>
+        <p class="form-note">An M-Pesa payment prompt will be sent to your phone. Only approve it if the amount and payment details are correct.</p>
+    {% else %}
+        <p class="form-note">Online payment is not enabled for this booking yet. Do not send money to anyone claiming to collect payment for this booking.</p>
+    {% endif %}
+    <a class="back centered" href="{{ url_for("index") }}">Return to events</a>
+</div>
+{% endblock %}

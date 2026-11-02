@@ -1,0 +1,7 @@
+Flask>=3.0,<4
+python-dotenv>=1.0
+requests>=2.31
+qrcode[pil]>=7.4
+reportlab>=4.0
+
+cryptography>=42.0

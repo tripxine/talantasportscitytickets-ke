@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Your digital ticket | TIKETI360{% endblock %}
+{% block content %}
+
+<div class="page-heading centered-text">
+    <div class="success-mark">✓</div>
+    <div class="eyebrow">BOOKING CONFIRMED</div>
+    <h1>Your ticket is <span class="accent">ready.</span></h1>
+    <p class="muted">Keep this QR code safe and present it at the authorised event entrance.</p>
+</div>
+
+<div class="digital-ticket">
+    <div class="ticket-top">
+        <div>
+            <div class="ticket-brand">TIKETI<span>360</span></div>
+            <small>KENYA · DIGITAL ENTRY PASS</small>
+        </div>
+        <span class="paid-pill">✓ PAID</span>
+    </div>
+
+    <div class="ticket-event">
+        <div class="ticket-event-icon">🏟️</div>
+        <div>
+            <small>YOUR EVENT</small>
+            <h2>{{ booking.event_name }}</h2>
+            <p>{{ booking.venue }}</p>
+        </div>
+    </div>
+
+    <div class="ticket-data">
+        <div><small>GROUP LEADER / ATTENDEE</small><b>{{ booking.full_name }}</b></div>
+        <div><small>EVENT DATE</small><b>{{ booking.event_date.replace('T',' · ') }}</b></div>
+        <div><small>TICKET TYPE</small><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
+        <div><small>BOOKING REFERENCE</small><b>{{ booking.reference }}</b></div>
+    </div>
+
+    {% if members %}
+    <div class="ticket-data">
+        <div><small>REGISTERED GROUP ATTENDEES</small></div>
+        {% for member in members %}
+        <div>
+            <small>{{ 'GROUP LEADER' if member.is_leader else 'ATTENDEE' }}</small>
+            <b>{{ member.full_name }}</b>
+            <small>ENTRY: {{ member.entry_status }}</small>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="ticket-qr">
+        <img src="{{ qr }}" alt="Ticket verification QR code">
+        <b>SCAN TO VERIFY TICKET</b>
+        <small>One QR code covers this booking. Group members are checked in individually.</small>
+    </div>
+
+    <div class="ticket-bottom">
+        <span>PAYMENT CONFIRMED</span>
+        <span>KES {{ "{:,}".format(booking.total_amount) }}</span>
+    </div>
+</div>
+
+<div class="ticket-actions">
+    <a class="btn primary" href="{{ url_for('ticket_pdf',reference=booking.reference) }}">↓ Download PDF ticket</a>
+    <a class="btn secondary" href="{{ url_for('index') }}">Back to events</a>
+</div>
+
+<p class="small-muted centered-text">Demo event ticket. Validity for real-world entry requires event organiser authorisation.</p>
+
+{% endblock %}

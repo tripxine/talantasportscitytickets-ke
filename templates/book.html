@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Book tickets | TIKETI360{% endblock %}
+{% block content %}
+
+<div class="page-heading">
+    <a class="back" href="{{ url_for('index') }}">← All events</a>
+    <div class="eyebrow">RESERVE YOUR PLACE</div>
+    <h1>Book your <span class="accent">tickets.</span></h1>
+    <p class="muted">Register every attendee and select the group leader.</p>
+</div>
+
+<div class="booking-layout">
+<section class="form-panel">
+<form method="post" id="booking-form">
+
+    <h2>Booking contact details</h2>
+    <label>Person making the booking
+        <input name="full_name" required minlength="2" placeholder="Full name">
+    </label>
+
+    <div class="form-row">
+        <label>Email address
+            <input type="email" name="email" required placeholder="you@example.com">
+        </label>
+        <label>Contact phone
+            <input type="tel" name="phone" required placeholder="07XXXXXXXX">
+        </label>
+    </div>
+
+    <h2 class="form-subhead">Choose your ticket package</h2>
+
+    <label>Ticket package
+        <select name="package" id="package" required>
+            <option value="" selected disabled>Choose a ticket package</option>
+            <option value="SOLO">Solo ticket — 1 person</option>
+            <option value="GROUP5">Group ticket — 5 people</option>
+            <option value="GROUP10">Group ticket — 10 people</option>
+        </select>
+    </label>
+
+    <h2 class="form-subhead">Ticket category</h2>
+    <div class="ticket-options">
+        {% for item in ticket_types %}
+        <label class="ticket-option">
+            <input type="radio" name="category"
+                   value="{{ item.code }}"
+                   data-price="{{ item.price }}"
+                   {% if loop.first %}checked{% endif %}
+                   required>
+            <span>
+                <b>{{ item.name }}</b>
+                <small>Price per attendee</small>
+            </span>
+            <strong>KES {{ "{:,}".format(item.price) }}</strong>
+        </label>
+        {% else %}
+        <p class="form-note">Ticket categories and prices have not been confirmed for this event.</p>
+        {% endfor %}
+    </div>
+
+    <div id="attendee-section" hidden>
+    <h2 class="form-subhead">Attendee identification details</h2>
+    <p class="muted">Enter the full name, National ID or passport number, and phone number for every attendee.</p>
+
+    <div id="members-container"></div>
+
+    <h2 class="form-subhead">Choose group leader</h2>
+    <label>Group leader
+        <select name="leader_index" id="leader-index" required>
+            <option value="1">Member 1</option>
+        </select>
+    </label>
+    <p class="form-note">The selected leader's name will appear on the main digital ticket.</p>
+    </div>
+
+    <div class="form-note">
+        Group discount: KSh 100 for each additional attendee.
+        Group of 5 receives KSh 400 off; group of 10 receives KSh 900 off.
+        Final prices depend on the confirmed ticket category.
+    </div>
+
+    {% if not booking_enabled %}
+    <div class="form-note">
+        Bookings are not open. Confirmed ticket prices are not yet available.
+    </div>
+    {% endif %}
+
+    <button class="btn primary full" type="submit"
+            {% if not booking_enabled %}disabled{% endif %}>
+        {% if booking_enabled %}Continue to payment →{% else %}Bookings currently unavailable{% endif %}
+    </button>
+</form>
+</section>
+
+<aside class="summary-panel">
+    <div class="summary-kicker">YOUR EVENT</div>
+    <div class="summary-art">🏟️</div>
+    <h3>{{ event.name }}</h3>
+    <p>⌖ {{ event.venue }}</p>
+    <p>◷ {{ event.event_date.replace('T',' · ') }}</p>
+
+    <div class="summary-divider"></div>
+    <div class="summary-line">
+        <span>Package</span>
+        <b id="package-summary">Solo</b>
+    </div>
+    <div class="summary-line">
+        <span>Attendees</span>
+        <b id="quantity-summary">1</b>
+    </div>
+    <div class="summary-line">
+        <span>Price per person</span>
+        <b id="unit-price">KES 0</b>
+    </div>
+    <div class="summary-line">
+        <span>Group discount</span>
+        <b id="discount-price">KES 0</b>
+    </div>
+    <div class="summary-divider"></div>
+    <div class="summary-line total">
+        <span>Estimated total</span>
+        <b id="total-price">KES 0</b>
+    </div>
+
+    <div class="secure-note">
+        ID details are encrypted before storage and are not included in ticket QR codes.
+    </div>
+</aside>
+</div>
+
+{% endblock %}

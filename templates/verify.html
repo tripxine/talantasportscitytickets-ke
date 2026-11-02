@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Ticket verification | TIKETI360{% endblock %}
+{% block content %}
+<div class="verify-wrap">
+    <div class="verify-card">
+        <div class="verify-icon {% if status == 'VALID' %}good{% else %}bad{% endif %}">
+            {% if status == 'VALID' %}✓{% else %}✕{% endif %}
+        </div>
+
+        <div class="eyebrow">TICKET VERIFICATION</div>
+        <h1>{{ status }}</h1>
+
+        {% if booking %}
+        <p class="muted">Ticket reference: <b>{{ booking.reference }}</b></p>
+
+        <div class="payment-details">
+            <div><span>Group leader / Attendee</span><b>{{ booking.full_name }}</b></div>
+            <div><span>Event</span><b>{{ booking.event_name }}</b></div>
+            <div><span>Category</span><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
+            <div><span>Venue</span><b>{{ booking.venue }}</b></div>
+            <div><span>Payment</span><b>{{ booking.payment_status }}</b></div>
+        </div>
+
+        {% if members %}
+        <section class="group-verification">
+            <h2>Group attendees</h2>
+            <p class="muted">Entry is checked individually for each attendee.</p>
+
+            {% for member in members %}
+            <div class="payment-details">
+                <div>
+                    <span>
+                        {{ 'Group leader' if member.is_leader else 'Attendee' }}
+                    </span>
+                    <b>{{ member.full_name }}</b>
+                </div>
+                <div>
+                    <span>Entry status</span>
+                    <b>{{ member.entry_status }}</b>
+                </div>
+            </div>
+            {% endfor %}
+
+            <p class="muted">
+                Checked in: {{ members|selectattr('entry_status', 'equalto', 'CHECKED_IN')|list|length }}
+                of {{ members|length }}
+            </p>
+        </section>
+        {% endif %}
+        {% else %}
+        <p>This QR code does not match a ticket in the system.</p>
+        {% endif %}
+
+        <a class="btn secondary full" href="{{ url_for('index') }}">Return to website</a>
+    </div>
+</div>
+{% endblock %}

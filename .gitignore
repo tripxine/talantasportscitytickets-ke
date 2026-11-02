@@ -1,0 +1,26 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+tiketi360.db
+
+# Secrets and environment
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Databases and backups
+*.db
+*.sqlite
+*.sqlite3
+backups/
+*.backup_*
+*.sqlite3.bak
+
+# Local files
+.DS_Store
