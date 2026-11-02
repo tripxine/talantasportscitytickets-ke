@@ -97,7 +97,7 @@
     <div class="summary-art">🏟️</div>
     <h3>{{ event.name }}</h3>
     <p>⌖ {{ event.venue }}</p>
-    <p>◷ {{ event.event_date.replace('T',' · ') }}</p>
+    <p>◷ {{ event.event_date.strftime('%d %b %Y · %I:%M %p') if event.event_date else 'Date to be announced' }}</p>
 
     <div class="summary-divider"></div>
     <div class="summary-line">
