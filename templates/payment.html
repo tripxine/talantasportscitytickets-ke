@@ -22,9 +22,24 @@
     {% endif %}
 
     <div class="payment-details">
-        <div><span>Customer</span><b>{{ booking.full_name }}</b></div>
+        <div><span>Customer / Group leader</span><b>{{ booking.full_name }}</b></div>
         <div><span>Phone</span><b>{{ booking.phone }}</b></div>
         <div><span>Ticket category</span><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
+
+        <div class="attendee-review">
+            <h3>Registered attendees</h3>
+            {% for member in members %}
+            <div class="summary-line">
+                <span>
+                    {{ loop.index }}. {{ member.full_name }}
+                    {% if member.is_leader %}(Group leader){% endif %}
+                </span>
+                <b>{{ member.phone }}</b>
+            </div>
+            {% else %}
+            <p class="form-note">No attendee records found.</p>
+            {% endfor %}
+        </div>
         <div>
             <span>Amount due</span>
             <b class="amount">

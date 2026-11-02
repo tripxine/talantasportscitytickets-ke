@@ -492,10 +492,19 @@ def payment(reference):
     if not booking:
         abort(404)
 
+    with db() as con:
+        members = con.execute("""
+            SELECT full_name, phone, is_leader
+            FROM group_members
+            WHERE booking_id=%s
+            ORDER BY id
+        """, (booking["id"],)).fetchall()
+
     # Browser requests must never mark bookings as paid.
     return render_template(
         "payment.html",
         booking=booking,
+        members=members,
         payment_mode=PAYMENT_MODE,
         can_pay=(
             PAYMENT_MODE == "PALPLUSS"
