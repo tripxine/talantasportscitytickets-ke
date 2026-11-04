@@ -232,7 +232,7 @@ def book(slug):
 
         if (
             len(contact_name) < 2
-            or not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", email)
+            or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)
             or not contact_phone
             or quantity not in (1, 5, 10)
             or (bool(prices) and category not in prices)
