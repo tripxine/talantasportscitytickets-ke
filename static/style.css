@@ -35,3 +35,42 @@
 .stadium-ticket-bottom{background:#10253a;color:#fff;padding:15px 25px}
 @media(max-width:420px){.stadium-ticket-hero{padding:19px 16px}.matchup{gap:10px}.team img{width:59px;height:59px}.stadium-ticket-data{padding-left:17px;padding-right:17px}.attendee-row{flex-direction:column;gap:4px}.attendee-row small{text-align:left}}
 @media print{.stadium-ticket{box-shadow:none}.ticket-actions,.page-heading,.small-muted,.topbar,footer{display:none!important}.stadium-ticket{width:100%;margin:0}}
+
+/* TIKETI360 - Kenyan flag and Talanta Stadium website background */
+html {
+    background: #07111f;
+}
+
+body {
+    position: relative;
+    isolation: isolate;
+    background: transparent;
+}
+
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+        linear-gradient(
+            to bottom,
+            rgba(0, 0, 0, 0.38) 0%,
+            rgba(0, 0, 0, 0.38) 30%,
+            rgba(255, 255, 255, 0.12) 31%,
+            rgba(255, 255, 255, 0.12) 33%,
+            rgba(190, 20, 35, 0.35) 34%,
+            rgba(190, 20, 35, 0.35) 62%,
+            rgba(255, 255, 255, 0.12) 63%,
+            rgba(255, 255, 255, 0.12) 65%,
+            rgba(0, 105, 55, 0.38) 66%,
+            rgba(0, 105, 55, 0.38) 100%
+        ),
+        linear-gradient(rgba(3, 10, 20, 0.58), rgba(3, 10, 20, 0.68)),
+        url("/static/images/talanta-stadium.jpeg");
+
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+}
