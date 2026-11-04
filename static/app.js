@@ -77,7 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
             );
 
             const unit = selected ? Number(selected.dataset.price) : 0;
-            const discount = Math.max(0, (count - 1) * 100);
+            const discount = Math.max(0, (count - 1) * 200);
             const total = Math.max(0, (unit * count) - discount);
 
             document.getElementById("package-summary").textContent =

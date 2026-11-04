@@ -1,4 +1,4 @@
-import os, io, uuid, secrets, base64, json
+import os, io, uuid, secrets, base64, json, re
 import psycopg
 from psycopg.rows import dict_row
 from datetime import datetime, timezone
@@ -14,21 +14,28 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from palpluss import PalPlussClient, PalPlussError
 
 load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY is not configured.")
+if not ADMIN_PASSWORD:
+    raise RuntimeError("ADMIN_PASSWORD is not configured.")
+
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "change-this-secret-before-deployment")
+app.secret_key = SECRET_KEY
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 PAYMENT_MODE = os.getenv("PAYMENT_MODE", "DISABLED").strip().upper()
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
-BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000")
+BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:5000").strip()
 
-EVENT_SEED = {
-    "slug": "talanta-demo-football-event",
-    "name": "Talanta Stadium Demo Football Event",
-    "description": "Demonstration event for testing the TIKETI360 booking and digital-ticket journey. This is not an announcement of an actual match.",
-    "venue": "Talanta Sports City (Raila Odinga International Stadium), Nairobi",
-    "event_date": "2027-01-05T15:00",
-    "status": "demo"
-}
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=BASE_URL.startswith("https://"),
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
 
 def db():
     if not DATABASE_URL:
@@ -94,6 +101,17 @@ def checkout_csrf_token():
 def validate_checkout_csrf(value):
     expected = session.get("checkout_csrf", "")
     return bool(expected and value and secrets.compare_digest(expected, value))
+
+
+def normalize_ke_phone(value):
+    phone = re.sub(r"[\s().-]", "", str(value or ""))
+    if phone.startswith("+"):
+        phone = phone[1:]
+    if phone.startswith("0"):
+        phone = "254" + phone[1:]
+    if re.fullmatch(r"254(?:7|1)\d{8}", phone):
+        return phone
+    return None
 
 
 def admin_required(fn):
@@ -178,7 +196,7 @@ def book(slug):
     if request.method == "POST":
         contact_name = request.form.get("full_name", "").strip()
         email = request.form.get("email", "").strip()
-        contact_phone = request.form.get("phone", "").strip().replace(" ", "")
+        contact_phone = normalize_ke_phone(request.form.get("phone", ""))
         category = request.form.get("category", "").strip()
         if not prices:
             category = "PRICE_PENDING"
@@ -196,28 +214,26 @@ def book(slug):
         for i in range(quantity):
             name = request.form.get(f"member_name_{i}", "").strip()
             id_number = request.form.get(f"member_id_{i}", "").strip()
-            member_phone = request.form.get(f"member_phone_{i}", "").strip().replace(" ", "")
+            member_phone = normalize_ke_phone(
+                request.form.get(f"member_phone_{i}", "")
+            )
             normalized_id = id_number.replace(" ", "").replace("-", "")
-            digits = member_phone.lstrip("+")
 
             if (
                 len(name) < 2
                 or not normalized_id.isalnum()
                 or not 5 <= len(normalized_id) <= 20
-                or not digits.isdigit()
-                or not 9 <= len(digits) <= 15
+                or not member_phone
             ):
                 flash(f"Please check the details for attendee {i + 1}.", "error")
                 return redirect(url_for("book", slug=slug))
 
             members.append((name, id_number, member_phone))
 
-        contact_digits = contact_phone.lstrip("+")
         if (
             len(contact_name) < 2
-            or "@" not in email
-            or not contact_digits.isdigit()
-            or not 9 <= len(contact_digits) <= 15
+            or not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", email)
+            or not contact_phone
             or quantity not in (1, 5, 10)
             or (bool(prices) and category not in prices)
             or not 0 <= leader_index < quantity
@@ -285,7 +301,13 @@ def palpluss_stk(reference):
         flash("This booking has no payable amount.", "error")
         return redirect(url_for("payment", reference=reference))
 
-    phone = request.form.get("phone", booking["phone"]).strip()
+    phone = normalize_ke_phone(
+        request.form.get("phone", booking["phone"])
+    )
+    if not phone:
+        flash("Enter a valid Kenyan M-PESA number, such as 0712345678.", "error")
+        return redirect(url_for("payment", reference=reference))
+
     callback_url = os.getenv("PALPLUSS_CALLBACK_URL", "").strip()
 
     if not callback_url:
@@ -416,10 +438,35 @@ def palpluss_callback():
         return jsonify({"ok": False, "message": "Transaction ID missing."}), 400
 
     txid = str(txid)
-    event_type = str(payload.get("event") or payload.get("type") or "transaction.update")
-    event_id = str(payload.get("event_id") or payload.get("eventId") or f"{txid}:{event_type}")
+    # Read event metadata from the outer payload or nested data.
+    event_type = str(
+        payload.get("event_type")
+        or root.get("event_type")
+        or payload.get("event")
+        or root.get("event")
+        or payload.get("type")
+        or root.get("type")
+        or "transaction.updated"
+    ).strip()
+
+    callback_status = str(
+        tx.get("status") or root.get("status") or "unknown"
+    ).strip().upper()
+
+    supplied_event_id = (
+        payload.get("event_id")
+        or payload.get("eventId")
+        or root.get("event_id")
+        or root.get("eventId")
+    )
+
+    event_id = str(
+        supplied_event_id
+        or f"{txid}:{event_type}:{callback_status}"
+    ).strip()
 
     try:
+        # Record the delivery. A retry can resume an event left in RECEIVED.
         with db() as con:
             con.execute("""
                 INSERT INTO payment_webhook_events(
@@ -429,56 +476,110 @@ def palpluss_callback():
                 ON CONFLICT(provider, provider_event_id) DO NOTHING
             """, (event_id, txid, event_type, json.dumps(payload), now()))
 
-        # Callback contents are untrusted; independently query PalPluss.
+        # Avoid unnecessary provider requests for already-finalized deliveries.
+        with db() as con:
+            previous = con.execute("""
+                SELECT processing_status
+                FROM payment_webhook_events
+                WHERE provider='PALPLUSS' AND provider_event_id=%s
+            """, (event_id,)).fetchone()
+
+        terminal_states = {
+            "SUCCESS", "REVERSED", "FAILED", "CANCELLED",
+            "EXPIRED", "REVIEW"
+        }
+        if previous and previous["processing_status"] in terminal_states:
+            return jsonify({"ok": True, "duplicate": True}), 200
+
+        # Callback data is untrusted; independently query the provider.
         verified = PalPlussClient().get_transaction(txid)
+        if not isinstance(verified, dict):
+            raise PalPlussError("Provider returned an invalid transaction response.")
+
         status = str(verified.get("status") or "").upper()
-        verified_id = str(verified.get("transaction_id") or verified.get("transactionId") or txid)
+        verified_id = str(
+            verified.get("id")
+            or verified.get("transaction_id")
+            or verified.get("transactionId")
+            or ""
+        )
         external_ref = str(
             verified.get("external_reference")
             or verified.get("account_reference")
             or verified.get("accountReference")
             or ""
         )
+
         phone = str(verified.get("phone_number") or verified.get("phone") or "")
         phone = phone.replace(" ", "").replace("-", "").lstrip("+")
         if phone.startswith("0"):
             phone = "254" + phone[1:]
-        amount = int(float(verified.get("amount") or 0))
+
+        expected_amount = verified.get("amount")
+        try:
+            from decimal import Decimal, InvalidOperation
+            amount_decimal = Decimal(str(expected_amount))
+            if not amount_decimal.is_finite() or amount_decimal != amount_decimal.to_integral_value():
+                raise ValueError("Amount is not a whole KES value.")
+            amount = int(amount_decimal)
+        except (InvalidOperation, ValueError, TypeError):
+            raise PalPlussError("Provider returned an invalid transaction amount.")
+
         currency = str(verified.get("currency") or "").upper()
         receipt = verified.get("mpesa_receipt") or verified.get("receipt")
 
         with db() as con:
+            # Serialize duplicate deliveries for this webhook event.
+            event = con.execute("""
+                SELECT processing_status
+                FROM payment_webhook_events
+                WHERE provider='PALPLUSS' AND provider_event_id=%s
+                FOR UPDATE
+            """, (event_id,)).fetchone()
+
+            if not event:
+                raise PalPlussError("Webhook event record not found.")
+
+            if event["processing_status"] in terminal_states:
+                return jsonify({"ok": True, "duplicate": True}), 200
+
             record = con.execute("""
                 SELECT * FROM payment_transactions
                 WHERE provider='PALPLUSS' AND provider_transaction_id=%s
                 FOR UPDATE
             """, (txid,)).fetchone()
+
             if not record:
                 raise PalPlussError("No matching local payment record.")
 
-            booking = con.execute(
-                "SELECT * FROM bookings WHERE id=%s FOR UPDATE",
-                (record["booking_id"],)
-            ).fetchone()
+            booking = con.execute("""
+                SELECT * FROM bookings WHERE id=%s FOR UPDATE
+            """, (record["booking_id"],)).fetchone()
+
             if not booking:
                 raise PalPlussError("Booking not found.")
 
-            expected_phone = str(record["phone"]).replace(" ", "").replace("-", "").lstrip("+")
+            expected_phone = str(record["phone"] or "")
+            expected_phone = expected_phone.replace(" ", "").replace("-", "").lstrip("+")
             if expected_phone.startswith("0"):
                 expected_phone = "254" + expected_phone[1:]
 
             valid = (
-                verified_id == txid
+                bool(verified_id)
+                and verified_id == txid
                 and external_ref == booking["reference"]
                 and amount == int(booking["total_amount"])
                 and amount == int(record["amount"])
                 and currency == "KES"
                 and phone == expected_phone
             )
+
             if not valid:
                 con.execute("""
                     UPDATE payment_transactions
-                    SET status='REVIEW', failure_reason=%s, updated_at=%s
+                    SET status='REVIEW',
+                        failure_reason=%s,
+                        updated_at=%s
                     WHERE id=%s
                 """, ("Provider details did not match booking.", now(), record["id"]))
                 con.execute("""
@@ -488,23 +589,46 @@ def palpluss_callback():
                 """, (now(), event_id))
                 return jsonify({"ok": False, "message": "Manual review required."}), 202
 
+            # A late success must never reactivate a reversed booking.
+            if booking["payment_status"] == "REVERSED" and status in ("SUCCESS", "COMPLETED"):
+                con.execute("""
+                    UPDATE payment_transactions
+                    SET status='REVIEW',
+                        failure_reason=%s,
+                        updated_at=%s
+                    WHERE id=%s
+                """, ("Provider reported success after the booking was reversed.", now(), record["id"]))
+                con.execute("""
+                    UPDATE payment_webhook_events
+                    SET processing_status='REVIEW', processed_at=%s
+                    WHERE provider='PALPLUSS' AND provider_event_id=%s
+                """, (now(), event_id))
+                return jsonify({"ok": False, "message": "Manual review required."}), 202
+
             if status in ("SUCCESS", "COMPLETED"):
                 token = booking["qr_token"] or secrets.token_urlsafe(32)
+
                 con.execute("""
                     UPDATE bookings
-                    SET payment_status='PAID', qr_token=%s,
-                        provider_receipt=%s, updated_at=%s
+                    SET payment_status='PAID',
+                        qr_token=%s,
+                        provider_receipt=%s,
+                        updated_at=%s
                     WHERE id=%s
                 """, (token, receipt, now(), booking["id"]))
+
                 con.execute("""
                     INSERT INTO tickets(
                         booking_id, ticket_number, qr_token, status, issued_at
                     ) VALUES(%s,%s,%s,'ACTIVE',%s)
-                    ON CONFLICT(booking_id) DO NOTHING
+                    ON CONFLICT(booking_id) DO UPDATE SET
+                        qr_token=EXCLUDED.qr_token,
+                        status='ACTIVE',
+                        revoked_at=NULL
                 """, (booking["id"], "TKT" + booking["reference"], token, now()))
                 final_status = "SUCCESS"
+
             elif status == "REVERSED":
-                # A confirmed reversal must revoke access to the digital ticket.
                 con.execute("""
                     UPDATE bookings
                     SET payment_status='REVERSED',
@@ -513,24 +637,35 @@ def palpluss_callback():
                         updated_at=%s
                     WHERE id=%s
                 """, (now(), booking["id"]))
+
+                con.execute("""
+                    UPDATE tickets
+                    SET status='REVOKED', revoked_at=%s
+                    WHERE booking_id=%s AND status <> 'REVOKED'
+                """, (now(), booking["id"]))
                 final_status = "REVERSED"
 
             elif status in ("FAILED", "CANCELLED", "EXPIRED"):
-                if booking["payment_status"] != "PAID":
+                if booking["payment_status"] not in ("PAID", "REVERSED"):
                     con.execute("""
                         UPDATE bookings
                         SET payment_status='FAILED', updated_at=%s
                         WHERE id=%s
                     """, (now(), booking["id"]))
                 final_status = status
+
+            elif status in ("PENDING", "PROCESSING"):
+                final_status = "PENDING"
+
             else:
-                final_status = "PENDING" if status in ("PENDING", "PROCESSING") else "REVIEW"
+                final_status = "REVIEW"
 
             con.execute("""
                 UPDATE payment_transactions
                 SET status=%s, provider_receipt=%s, updated_at=%s
                 WHERE id=%s
             """, (final_status, receipt, now(), record["id"]))
+
             con.execute("""
                 UPDATE payment_webhook_events
                 SET processing_status=%s, processed_at=%s
@@ -538,6 +673,7 @@ def palpluss_callback():
             """, (final_status, now(), event_id))
 
         return jsonify({"ok": True}), 200
+
     except PalPlussError:
         app.logger.exception("PalPluss callback verification failed")
         return jsonify({"ok": False, "message": "Transaction not verified."}), 202
@@ -630,35 +766,169 @@ def ticket(reference):
 @app.route("/ticket/<reference>/pdf")
 def ticket_pdf(reference):
     booking = get_booking(reference)
-    if not booking: abort(404)
-    if booking["payment_status"] != "PAID" or not booking["qr_token"]: abort(403)
+    if not booking:
+        abort(404)
+    if booking["payment_status"] != "PAID" or not booking["qr_token"]:
+        abort(403)
+
     from reportlab.lib.pagesizes import A5
-    from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
+    from reportlab.lib.colors import HexColor, white
+    from reportlab.pdfgen import canvas
     import tempfile
+    import os
+
+    width, height = A5
     path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-    c = canvas.Canvas(path, pagesize=A5)
-    w,h=A5
-    c.setFillColorRGB(.035,.075,.15); c.rect(0,h-100,w,100,fill=1,stroke=0)
-    c.setFillColorRGB(1,1,1); c.setFont("Helvetica-Bold",20); c.drawString(28,h-48,"TIKETI360")
-    c.setFont("Helvetica",9); c.drawString(28,h-68,"DIGITAL EVENT TICKET")
-    c.setFillColorRGB(.08,.12,.2); c.setFont("Helvetica-Bold",15); c.drawString(28,h-132,booking["event_name"][:42])
-    c.setFont("Helvetica",10)
-    lines=[("Name",booking["full_name"]),("Venue",booking["venue"]),("Date",booking["event_date"]),
-           ("Category",booking["category"]),("Quantity",str(booking["quantity"])),
-           ("Reference",booking["reference"]),("Payment",booking["payment_status"])]
-    y=h-160
-    for label,value in lines:
-        c.setFont("Helvetica-Bold",9); c.drawString(28,y,label.upper())
-        c.setFont("Helvetica",10); c.drawString(110,y,str(value)[:48]); y-=22
-    qr_img=qrcode.make(BASE_URL.rstrip("/") + url_for("verify_ticket",token=booking["qr_token"]))
-    qpath=tempfile.NamedTemporaryFile(suffix=".png",delete=False).name
-    qr_img.save(qpath)
-    c.drawImage(qpath,w-125,35,width=95,height=95)
-    c.setFont("Helvetica",7); c.drawString(28,45,"Present this QR code at the authorised event entrance.")
-    c.drawString(28,32,"A ticket is valid only after payment confirmation.")
-    c.save()
-    return send_file(path, as_attachment=True, download_name=f"{booking['reference']}.pdf", mimetype="application/pdf")
+    qr_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+
+    stadium_path = os.path.join(app.static_folder, "images", "talanta-stadium.jpeg")
+    bayern_path = os.path.join(app.static_folder, "images", "bayern-logo.jpeg")
+    ajax_path = os.path.join(app.static_folder, "images", "ajax-logo.jpeg")
+
+    try:
+        qr_img = qrcode.make(
+            BASE_URL.rstrip("/") + url_for(
+                "verify_ticket", token=booking["qr_token"]
+            )
+        )
+        qr_img.save(qr_path)
+
+        c = canvas.Canvas(path, pagesize=A5)
+
+        # Stadium photograph background with a dark readability overlay.
+        if os.path.isfile(stadium_path):
+            c.drawImage(
+                ImageReader(stadium_path), 0, 0,
+                width=width, height=height, preserveAspectRatio=False
+            )
+        else:
+            c.setFillColor(HexColor("#10253a"))
+            c.rect(0, 0, width, height, fill=1, stroke=0)
+
+        c.saveState()
+        c.setFillAlpha(0.78)
+        c.setFillColor(HexColor("#071525"))
+        c.rect(0, 0, width, height, fill=1, stroke=0)
+        c.restoreState()
+
+        # Main ticket panel.
+        c.setFillColor(HexColor("#10253a"))
+        c.roundRect(17, 17, width - 34, height - 34, 13, fill=1, stroke=0)
+
+        c.setFillColor(white)
+        c.setFont("Helvetica-Bold", 19)
+        c.drawString(32, height - 53, "TIKETI360")
+        c.setFillColor(HexColor("#49d8d0"))
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(33, height - 68, "KENYA  |  DIGITAL ENTRY PASS")
+
+        c.setFillColor(HexColor("#85edc6"))
+        c.roundRect(width - 91, height - 61, 57, 19, 8, fill=1, stroke=0)
+        c.setFillColor(HexColor("#0b392d"))
+        c.setFont("Helvetica-Bold", 8)
+        c.drawCentredString(width - 62.5, height - 54, "PAID")
+
+        # Team logos and matchup.
+        logo_y = height - 165
+        logo_size = 57
+        if os.path.isfile(bayern_path):
+            c.drawImage(ImageReader(bayern_path), 53, logo_y,
+                        width=logo_size, height=logo_size,
+                        preserveAspectRatio=True, mask="auto")
+        if os.path.isfile(ajax_path):
+            c.drawImage(ImageReader(ajax_path), width - 110, logo_y,
+                        width=logo_size, height=logo_size,
+                        preserveAspectRatio=True, mask="auto")
+
+        c.setFillColor(white)
+        c.setFont("Helvetica-Bold", 13)
+        c.drawCentredString(width / 2, logo_y + 27, "BAYERN")
+        c.setFillColor(HexColor("#49d8d0"))
+        c.setFont("Helvetica-Bold", 10)
+        c.drawCentredString(width / 2, logo_y + 11, "VS")
+        c.setFillColor(white)
+        c.setFont("Helvetica-Bold", 13)
+        c.drawCentredString(width / 2, logo_y - 7, "AJAX")
+
+        c.setFillColor(HexColor("#49d8d0"))
+        c.setFont("Helvetica-Bold", 8)
+        c.drawCentredString(width / 2, height - 190, "TALANTA STADIUM")
+
+        # Event and holder information.
+        c.setStrokeColor(HexColor("#496078"))
+        c.line(32, height - 207, width - 32, height - 207)
+
+        details = [
+            ("EVENT", str(booking["event_name"])),
+            ("TICKET HOLDER / GROUP LEADER", str(booking["full_name"])),
+            ("VENUE", str(booking["venue"])),
+            ("EVENT DATE & TIME", str(booking["event_date"]).replace("T", " · ")),
+            ("CATEGORY / QUANTITY", f'{booking["category"]} x {booking["quantity"]}'),
+            ("BOOKING REFERENCE", str(booking["reference"])),
+        ]
+
+        y = height - 229
+        for label, value in details:
+            c.setFillColor(HexColor("#9bb0c2"))
+            c.setFont("Helvetica-Bold", 7)
+            c.drawString(32, y, label[:42])
+            c.setFillColor(white)
+            c.setFont("Helvetica", 9)
+            c.drawString(32, y - 13, value[:66])
+            y -= 38
+
+        # Group attendee names, if applicable.
+        with db() as con:
+            members = con.execute("""
+                SELECT full_name, is_leader
+                FROM group_members
+                WHERE booking_id=%s
+                ORDER BY id
+            """, (booking["id"],)).fetchall()
+
+        if members:
+            c.setFillColor(HexColor("#49d8d0"))
+            c.setFont("Helvetica-Bold", 7)
+            c.drawString(32, y, "REGISTERED ATTENDEES")
+            y -= 13
+            c.setFillColor(white)
+            c.setFont("Helvetica", 7)
+            for member in members[:5]:
+                c.drawString(32, y, str(member["full_name"])[:42])
+                y -= 11
+
+        # QR is printed on a white panel for reliable scanning.
+        qr_size = 105
+        qr_x = width - qr_size - 33
+        qr_y = 35
+        c.setFillColor(white)
+        c.roundRect(qr_x - 7, qr_y - 7, qr_size + 14, qr_size + 29,
+                    7, fill=1, stroke=0)
+        c.drawImage(qr_path, qr_x, qr_y, width=qr_size, height=qr_size)
+        c.setFillColor(HexColor("#10253a"))
+        c.setFont("Helvetica-Bold", 7)
+        c.drawCentredString(qr_x + qr_size / 2, qr_y - 1,
+                            "SCAN TO VERIFY")
+
+        c.setFillColor(HexColor("#49d8d0"))
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(32, 53, "PAYMENT CONFIRMED")
+        c.setFillColor(white)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(32, 37, f'KES {int(booking["total_amount"]):,}')
+
+        c.save()
+    finally:
+        if os.path.exists(qr_path):
+            os.unlink(qr_path)
+
+    return send_file(
+        path,
+        as_attachment=True,
+        download_name=f'{booking["reference"]}.pdf',
+        mimetype="application/pdf"
+    )
 
 @app.route("/verify/<token>")
 def verify_ticket(token):
@@ -875,25 +1145,39 @@ def admin():
             COALESCE(SUM(CASE WHEN payment_status='PAID' THEN quantity ELSE 0 END),0) AS tickets
             FROM bookings""").fetchone()
         events=con.execute("SELECT * FROM events ORDER BY id DESC").fetchall()
-    return render_template("admin.html",bookings=bookings,stats=stats,events=events)
+    return render_template(
+        "admin.html", bookings=bookings, stats=stats, events=events,
+        csrf_token=checkout_csrf_token()
+    )
 
 @app.route("/admin/login", methods=["GET","POST"])
 def admin_login():
-    if request.method=="POST":
-        if secrets.compare_digest(request.form.get("password",""),ADMIN_PASSWORD):
-            session["admin"]=True
+    if request.method == "POST":
+        if not validate_checkout_csrf(request.form.get("csrf_token")):
+            abort(400)
+        if secrets.compare_digest(request.form.get("password", ""), ADMIN_PASSWORD):
+            session.clear()
+            session["admin"] = True
             return redirect(url_for("admin"))
-        flash("Incorrect admin password.","error")
-    return render_template("admin_login.html")
+        flash("Incorrect admin password.", "error")
+    return render_template(
+        "admin_login.html",
+        csrf_token=checkout_csrf_token()
+    )
 
-@app.route("/admin/logout")
+@app.route("/admin/logout", methods=["POST"])
+@admin_required
 def admin_logout():
+    if not validate_checkout_csrf(request.form.get("csrf_token")):
+        abort(400)
     session.clear()
     return redirect(url_for("index"))
 
 @app.route("/admin/events", methods=["POST"])
 @admin_required
 def create_event():
+    if not validate_checkout_csrf(request.form.get("csrf_token")):
+        abort(400)
     name=request.form.get("name","").strip()
     venue=request.form.get("venue","").strip()
     date=request.form.get("event_date","").strip()
@@ -911,13 +1195,15 @@ def create_event():
 @app.route("/admin/events/<int:event_id>/toggle", methods=["POST"])
 @admin_required
 def toggle_event(event_id):
+    if not validate_checkout_csrf(request.form.get("csrf_token")):
+        abort(400)
     with db() as con:
         con.execute("UPDATE events SET status=CASE WHEN status='published' THEN 'hidden' ELSE 'published' END WHERE id=%s",(event_id,))
     return redirect(url_for("admin"))
 
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok","payment_mode":PAYMENT_MODE})
+    return jsonify({"status": "ok"})
 
 init_db()
 if __name__ == "__main__":
