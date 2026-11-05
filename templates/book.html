@@ -44,19 +44,33 @@
         <label class="ticket-option">
             <input type="radio" name="category"
                    value="{{ item.code }}"
-                   data-price="{{ item.price }}"
+                   data-price="{{ item.price if item.price is not none else '' }}"
+                   data-wave1-price="{{ item.wave1_price if item.wave1_price is not none else '' }}"
+                   data-wave2-price="{{ item.wave2_price if item.wave2_price is not none else '' }}"
                    {% if loop.first %}checked{% endif %}
                    required>
             <span>
                 <b>{{ item.name }}</b>
-                <small>Price per attendee</small>
+                <small>{% if is_wave_event %}Choose a wave to see the price{% else %}Price per attendee{% endif %}</small>
             </span>
-            <strong>KES {{ "{:,}".format(item.price) }}</strong>
+            <strong class="ticket-price-label">
+                {% if is_wave_event %}Price pending{% elif item.price is not none %}KES {{ "{:,}".format(item.price) }}{% else %}Price pending{% endif %}
+            </strong>
         </label>
         {% else %}
         <p class="form-note">Ticket categories and prices have not been confirmed for this event.</p>
         {% endfor %}
     </div>
+
+    {% if is_wave_event %}
+    <label id="wave-selector-label">Ticket wave
+        <select name="wave" id="wave" required>
+            <option value="" selected disabled>Choose Wave 1 or Wave 2</option>
+            <option value="WAVE1">Wave 1</option>
+            <option value="WAVE2">Wave 2</option>
+        </select>
+    </label>
+    {% endif %}
 
     <div id="attendee-section" hidden>
     <h2 class="form-subhead">Attendee identification details</h2>

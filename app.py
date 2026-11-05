@@ -133,9 +133,9 @@ def get_event(slug):
 def get_ticket_types(event_id):
     with db() as con:
         return con.execute("""
-            SELECT code, name, price
+            SELECT code, name, price, wave1_price, wave2_price
             FROM ticket_types
-            WHERE event_id=%s AND is_active IS TRUE AND price IS NOT NULL
+            WHERE event_id=%s AND is_active IS TRUE
             ORDER BY id
         """, (event_id,)).fetchall()
 
@@ -188,9 +188,15 @@ def book(slug):
         abort(404)
 
     ticket_types = get_ticket_types(event["id"])
-    prices = {item["code"]: int(item["price"]) for item in ticket_types}
+    is_wave_event = int(event["id"]) == 2
 
-    # Allow unpaid reservations; payment remains disabled until verified.
+    ticket_by_code = {item["code"]: item for item in ticket_types}
+    prices = {
+        item["code"]: int(item["price"])
+        for item in ticket_types
+        if item["price"] is not None
+    }
+
     booking_enabled = True
 
     if request.method == "POST":
@@ -198,12 +204,12 @@ def book(slug):
         email = request.form.get("email", "").strip()
         contact_phone = normalize_ke_phone(request.form.get("phone", ""))
         category = request.form.get("category", "").strip()
-        if not prices:
-            category = "PRICE_PENDING"
 
         package_sizes = {"SOLO": 1, "GROUP5": 5, "GROUP10": 10}
         package = request.form.get("package", "").strip()
         quantity = package_sizes.get(package, 0)
+
+        wave = request.form.get("wave", "").strip().upper() if is_wave_event else None
 
         try:
             leader_index = int(request.form.get("leader_index", "-1"))
@@ -230,19 +236,44 @@ def book(slug):
 
             members.append((name, id_number, member_phone))
 
+        category_valid = (
+            category in ticket_by_code
+            if is_wave_event
+            else (not prices or category in prices)
+        )
+
         if (
             len(contact_name) < 2
             or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)
             or not contact_phone
             or quantity not in (1, 5, 10)
-            or (bool(prices) and category not in prices)
+            or not category_valid
             or not 0 <= leader_index < quantity
             or len(members) != quantity
         ):
             flash("Please check your contact details, package, ticket category and group leader.", "error")
             return redirect(url_for("book", slug=slug))
 
-        unit_price = prices.get(category, 0)
+        if is_wave_event:
+            if wave not in ("WAVE1", "WAVE2"):
+                flash("Please select Wave 1 or Wave 2.", "error")
+                return redirect(url_for("book", slug=slug))
+
+            selected_ticket = ticket_by_code.get(category)
+            unit_price = (
+                selected_ticket.get("wave1_price")
+                if wave == "WAVE1"
+                else selected_ticket.get("wave2_price")
+            )
+
+            if unit_price is None:
+                flash("The selected ticket wave does not have a price configured yet. Please try again later.", "error")
+                return redirect(url_for("book", slug=slug))
+
+            unit_price = int(unit_price)
+        else:
+            unit_price = prices.get(category, 0)
+
         discount = 200 * (quantity - 1)
         total_amount = max(0, unit_price * quantity - discount)
         leader_name = members[leader_index][0]
@@ -252,12 +283,14 @@ def book(slug):
             cursor = con.execute("""
                 INSERT INTO bookings(
                     reference, event_id, full_name, email, phone, category,
-                    quantity, unit_price, discount_amount, total_amount, payment_status, created_at
-                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'UNPAID',%s)
+                    wave, quantity, unit_price, discount_amount, total_amount,
+                    payment_status, created_at
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'UNPAID',%s)
                 RETURNING id
             """, (
                 reference, event["id"], leader_name, email, contact_phone,
-                category, quantity, unit_price, discount, total_amount, now()
+                category, wave, quantity, unit_price, discount,
+                total_amount, now()
             ))
 
             booking_id = cursor.fetchone()["id"]
@@ -279,7 +312,8 @@ def book(slug):
         "book.html",
         event=event,
         ticket_types=ticket_types,
-        booking_enabled=booking_enabled
+        booking_enabled=booking_enabled,
+        is_wave_event=is_wave_event
     )
 
 
@@ -865,8 +899,13 @@ def ticket_pdf(reference):
             ("VENUE", str(booking["venue"])),
             ("EVENT DATE & TIME", str(booking["event_date"]).replace("T", " · ")),
             ("CATEGORY / QUANTITY", f'{booking["category"]} x {booking["quantity"]}'),
-            ("BOOKING REFERENCE", str(booking["reference"])),
         ]
+
+        if booking["wave"]:
+            wave_label = str(booking["wave"]).replace("WAVE", "Wave ")
+            details.append(("TICKET WAVE", wave_label))
+
+        details.append(("BOOKING REFERENCE", str(booking["reference"])))
 
         y = height - 229
         for label, value in details:

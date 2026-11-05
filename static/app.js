@@ -70,13 +70,27 @@ document.addEventListener("DOMContentLoaded", () => {
             updateSummary();
         }
 
+        const waveSelect = document.getElementById("wave");
+
         function updateSummary() {
             const count = packageSizes[packageSelect.value] || 1;
             const selected = form.querySelector(
                 'input[name="category"]:checked'
             );
 
-            const unit = selected ? Number(selected.dataset.price) : 0;
+            const selectedWave = waveSelect ? waveSelect.value : "";
+            const priceFor = input => {
+                if (!input) return "";
+                if (!waveSelect) return input.dataset.price || "";
+                if (selectedWave === "WAVE1") return input.dataset.wave1Price || "";
+                if (selectedWave === "WAVE2") return input.dataset.wave2Price || "";
+                return "";
+            };
+
+            const priceValue = priceFor(selected);
+            const hasPrice = priceValue !== "" &&
+                Number.isFinite(Number(priceValue));
+            const unit = hasPrice ? Number(priceValue) : 0;
             const discount = Math.max(0, (count - 1) * 200);
             const total = Math.max(0, (unit * count) - discount);
 
@@ -84,11 +98,26 @@ document.addEventListener("DOMContentLoaded", () => {
                 packageNames[packageSelect.value] || "Solo";
 
             document.getElementById("quantity-summary").textContent = count;
-            document.getElementById("unit-price").textContent = money(unit);
+            document.getElementById("unit-price").textContent =
+                hasPrice ? money(unit) : "Price pending";
             document.getElementById("discount-price").textContent =
                 money(discount);
             document.getElementById("total-price").textContent =
-                money(total);
+                hasPrice ? money(total) : "Price pending";
+
+            form.querySelectorAll('input[name="category"]').forEach(input => {
+                const label = input.closest(".ticket-option");
+                const priceLabel = label?.querySelector(".ticket-price-label");
+                if (!priceLabel) return;
+
+                const value = priceFor(input);
+                priceLabel.textContent = value !== "" &&
+                    Number.isFinite(Number(value))
+                    ? money(Number(value))
+                    : (waveSelect && !selectedWave
+                        ? "Choose a wave"
+                        : "Price pending");
+            });
         }
 
         packageSelect.addEventListener("change", renderMembers);
@@ -96,6 +125,12 @@ document.addEventListener("DOMContentLoaded", () => {
         form.querySelectorAll('input[name="category"]').forEach(input => {
             input.addEventListener("change", updateSummary);
         });
+
+        if (waveSelect) {
+            waveSelect.addEventListener("change", updateSummary);
+        }
+
+        updateSummary();
 
     }
 

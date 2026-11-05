@@ -70,10 +70,10 @@
             <input id="payment-phone" name="phone" type="tel" value="{{ booking.phone }}" required autocomplete="tel" placeholder="07XXXXXXXX">
             <button class="btn primary full" type="submit">Complete Payment</button>
         </form>
-        <p class="form-note">A PalPluss STK Push will be sent to your phone. Check that the amount is correct before approving the M-PESA prompt.</p>
+        <p class="form-note">An STK Push will be sent to your phone. Check that the amount is correct before approving the M-PESA prompt.</p>
 
     {% else %}
-        <p class="form-note">Online payment is not enabled for this booking yet. Do not send money to anyone claiming to collect payment for this booking.</p>
+        <p class="form-note">Incase of any challenges encountered during payment please contact our support at +254756189254.</p>
     {% endif %}
 
     <a class="back centered" href="{{ url_for('index') }}">Return to events</a>

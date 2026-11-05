@@ -45,6 +45,9 @@
         <div><small>TICKET HOLDER / GROUP LEADER</small><b>{{ booking.full_name }}</b></div>
         <div><small>EVENT DATE & TIME</small><b>{{ booking.event_date.replace('T',' · ') }}</b></div>
         <div><small>TICKET CATEGORY</small><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
+        {% if booking.wave %}
+        <div><small>TICKET WAVE</small><b>{{ booking.wave.replace('WAVE', 'Wave ') }}</b></div>
+        {% endif %}
         <div><small>BOOKING REFERENCE</small><b>{{ booking.reference }}</b></div>
     </div>
 
