@@ -255,8 +255,8 @@ def book(slug):
             return redirect(url_for("book", slug=slug))
 
         if is_wave_event:
-            if wave not in ("WAVE1", "WAVE2"):
-                flash("Please select Wave 1 or Wave 2.", "error")
+            if wave != "WAVE1":
+                flash("Only Wave 1 Early Bird tickets are currently available.", "error")
                 return redirect(url_for("book", slug=slug))
 
             selected_ticket = ticket_by_code.get(category)
