@@ -140,6 +140,29 @@ def get_ticket_types(event_id):
         """, (event_id,)).fetchall()
 
 
+
+
+def get_package_pricing(event_id):
+    with db() as con:
+        rows = con.execute("""
+            SELECT category_code, wave, package_code,
+                   package_price, discount_amount
+            FROM ticket_package_pricing
+            WHERE event_id=%s AND is_active IS TRUE
+        """, (event_id,)).fetchall()
+
+    return [
+        {
+            "category_code": row["category_code"],
+            "wave": row["wave"],
+            "package_code": row["package_code"],
+            "package_price": row["package_price"],
+            "discount_amount": row["discount_amount"]
+        }
+        for row in rows
+    ]
+
+
 def get_primary_event_slug():
     with db() as con:
         setting = con.execute(
@@ -188,13 +211,17 @@ def book(slug):
         abort(404)
 
     ticket_types = get_ticket_types(event["id"])
+    package_pricing = get_package_pricing(event["id"])
     is_wave_event = int(event["id"]) == 2
-
     ticket_by_code = {item["code"]: item for item in ticket_types}
-    prices = {
-        item["code"]: int(item["price"])
-        for item in ticket_types
-        if item["price"] is not None
+
+    package_sizes = {
+        "SOLO": 1,
+        "COUPLE": 2,
+        "FAMILY3": 3,
+        "FAMILY4": 4,
+        "GROUP5": 5,
+        "GROUP10": 10
     }
 
     booking_enabled = True
@@ -204,12 +231,18 @@ def book(slug):
         email = request.form.get("email", "").strip()
         contact_phone = normalize_ke_phone(request.form.get("phone", ""))
         category = request.form.get("category", "").strip()
+        package_selection = request.form.get("package", "").strip()
 
-        package_sizes = {"SOLO": 1, "GROUP5": 5, "GROUP10": 10}
-        package = request.form.get("package", "").strip()
+        if package_selection == "FAMILY":
+            family_size = request.form.get("family_size", "").strip()
+            package = f"FAMILY{family_size}" if family_size in ("3", "4") else ""
+        else:
+            package = package_selection
+
         quantity = package_sizes.get(package, 0)
 
         wave = request.form.get("wave", "").strip().upper() if is_wave_event else None
+        pricing_wave = wave if is_wave_event else "LEGACY"
 
         try:
             leader_index = int(request.form.get("leader_index", "-1"))
@@ -236,46 +269,78 @@ def book(slug):
 
             members.append((name, id_number, member_phone))
 
-        category_valid = (
-            category in ticket_by_code
-            if is_wave_event
-            else (not prices or category in prices)
-        )
+        selected_ticket = ticket_by_code.get(category)
 
         if (
             len(contact_name) < 2
             or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)
             or not contact_phone
-            or quantity not in (1, 5, 10)
-            or not category_valid
+            or quantity not in package_sizes.values()
+            or not selected_ticket
             or not 0 <= leader_index < quantity
             or len(members) != quantity
         ):
-            flash("Please check your contact details, package, ticket category and group leader.", "error")
+            flash(
+                "Please check your contact details, package, ticket category and group leader.",
+                "error"
+            )
+            return redirect(url_for("book", slug=slug))
+
+        if is_wave_event and wave != "WAVE1":
+            flash(
+                "Only Wave 1 Early Bird tickets are currently available.",
+                "error"
+            )
             return redirect(url_for("book", slug=slug))
 
         if is_wave_event:
-            if wave != "WAVE1":
-                flash("Only Wave 1 Early Bird tickets are currently available.", "error")
-                return redirect(url_for("book", slug=slug))
-
-            selected_ticket = ticket_by_code.get(category)
-            unit_price = (
-                selected_ticket.get("wave1_price")
-                if wave == "WAVE1"
-                else selected_ticket.get("wave2_price")
-            )
-
-            if unit_price is None:
-                flash("The selected ticket wave does not have a price configured yet. Please try again later.", "error")
-                return redirect(url_for("book", slug=slug))
-
-            unit_price = int(unit_price)
+            raw_unit_price = selected_ticket.get("wave1_price")
         else:
-            unit_price = prices.get(category, 0)
+            raw_unit_price = selected_ticket.get("price")
 
-        discount = 200 * (quantity - 1)
-        total_amount = max(0, unit_price * quantity - discount)
+        if raw_unit_price is None:
+            flash(
+                "The selected ticket category does not have a base price configured yet.",
+                "error"
+            )
+            return redirect(url_for("book", slug=slug))
+
+        unit_price = int(raw_unit_price)
+        base_total = unit_price * quantity
+
+        pricing_rule = next(
+            (
+                rule for rule in package_pricing
+                if rule["category_code"] == category
+                and rule["wave"] == pricing_wave
+                and rule["package_code"] == package
+            ),
+            None
+        )
+
+        if (
+            not pricing_rule
+            or (
+                pricing_rule["package_price"] is None
+                and pricing_rule["discount_amount"] is None
+            )
+        ):
+            flash(
+                "This package has not been configured for the selected ticket category and wave yet.",
+                "error"
+            )
+            return redirect(url_for("book", slug=slug))
+
+        if pricing_rule["package_price"] is not None:
+            total_amount = int(pricing_rule["package_price"])
+            discount = max(0, base_total - total_amount)
+        else:
+            discount = min(
+                int(pricing_rule["discount_amount"]),
+                base_total
+            )
+            total_amount = base_total - discount
+
         leader_name = members[leader_index][0]
         reference = "TK" + uuid.uuid4().hex[:10].upper()
 
@@ -283,17 +348,20 @@ def book(slug):
             cursor = con.execute("""
                 INSERT INTO bookings(
                     reference, event_id, full_name, email, phone, category,
-                    wave, quantity, unit_price, discount_amount, total_amount,
-                    payment_status, created_at
-                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'UNPAID',%s)
+                    wave, package_code, quantity, unit_price,
+                    discount_amount, total_amount, payment_status, created_at
+                ) VALUES(
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'UNPAID',%s
+                )
                 RETURNING id
             """, (
                 reference, event["id"], leader_name, email, contact_phone,
-                category, wave, quantity, unit_price, discount,
+                category, wave, package, quantity, unit_price, discount,
                 total_amount, now()
             ))
 
             booking_id = cursor.fetchone()["id"]
+
             for i, (name, id_number, member_phone) in enumerate(members):
                 con.execute("""
                     INSERT INTO group_members(
@@ -312,6 +380,7 @@ def book(slug):
         "book.html",
         event=event,
         ticket_types=ticket_types,
+        package_pricing=package_pricing,
         booking_enabled=booking_enabled,
         is_wave_event=is_wave_event
     )
@@ -898,6 +967,14 @@ def ticket_pdf(reference):
             ("TICKET HOLDER / GROUP LEADER", str(booking["full_name"])),
             ("VENUE", str(booking["venue"])),
             ("EVENT DATE & TIME", str(booking["event_date"]).replace("T", " · ")),
+            ("TICKET PACKAGE", {
+                "SOLO": "Solo",
+                "COUPLE": "Couple",
+                "FAMILY3": "Family of 3",
+                "FAMILY4": "Family of 4",
+                "GROUP5": "Group of 5",
+                "GROUP10": "Group of 10",
+            }.get(booking.get("package_code"), "Legacy booking")),
             ("CATEGORY / QUANTITY", f'{booking["category"]} x {booking["quantity"]}'),
         ]
 

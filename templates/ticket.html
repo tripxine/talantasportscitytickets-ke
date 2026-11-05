@@ -44,6 +44,7 @@
     <div class="ticket-data stadium-ticket-data">
         <div><small>TICKET HOLDER / GROUP LEADER</small><b>{{ booking.full_name }}</b></div>
         <div><small>EVENT DATE & TIME</small><b>{{ booking.event_date.replace('T',' · ') }}</b></div>
+        <div><small>TICKET PACKAGE</small><b>{{ {'SOLO': 'Solo', 'COUPLE': 'Couple', 'FAMILY3': 'Family of 3', 'FAMILY4': 'Family of 4', 'GROUP5': 'Group of 5', 'GROUP10': 'Group of 10'}.get(booking.package_code, 'Legacy booking') }}</b></div>
         <div><small>TICKET CATEGORY</small><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
         {% if booking.wave %}
         <div><small>TICKET WAVE</small><b>{{ booking.wave.replace('WAVE', 'Wave ') }}</b></div>

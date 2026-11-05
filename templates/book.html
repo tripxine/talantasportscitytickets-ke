@@ -33,8 +33,16 @@
         <select name="package" id="package" required>
             <option value="" selected disabled>Choose a ticket package</option>
             <option value="SOLO">Solo ticket — 1 person</option>
+            <option value="COUPLE">Couple ticket — 2 people</option>
+            <option value="FAMILY">Family ticket — 3 or 4 people</option>
             <option value="GROUP5">Group ticket — 5 people</option>
             <option value="GROUP10">Group ticket — 10 people</option>
+        </select>
+    </label>
+    <label id="family-size-label" hidden>Family size
+        <select id="family-size" name="family_size">
+            <option value="3" selected>3 people</option>
+            <option value="4">4 people</option>
         </select>
     </label>
 
@@ -86,10 +94,10 @@
     </div>
 
     <div class="form-note">
-        Group discount: KSh 200 for each additional attendee.
-        Group of 5 receives KSh 800 off; group of 10 receives KSh 1,800 off.
-        Final prices depend on the confirmed ticket category.
+        Package prices and discounts are configured by the event administrator.
+        A package cannot be booked until its price rule is available.
     </div>
+    <script id="package-pricing-data" type="application/json">{{ package_pricing|tojson }}</script>
 
     {% if not booking_enabled %}
     <div class="form-note">

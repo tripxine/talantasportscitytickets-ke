@@ -24,6 +24,7 @@
     <div class="payment-details">
         <div><span>Customer / Group leader</span><b>{{ booking.full_name }}</b></div>
         <div><span>Phone</span><b>{{ booking.phone }}</b></div>
+        <div><span>Ticket package</span><b>{{ {'SOLO': 'Solo', 'COUPLE': 'Couple', 'FAMILY3': 'Family of 3', 'FAMILY4': 'Family of 4', 'GROUP5': 'Group of 5', 'GROUP10': 'Group of 10'}.get(booking.package_code, 'Legacy booking') }}</b></div>
         <div><span>Ticket category</span><b>{{ booking.category }} × {{ booking.quantity }}</b></div>
 
         <div class="attendee-review">

@@ -3,37 +3,79 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (form) {
         const packageSelect = document.getElementById("package");
+        const familySizeSelect = document.getElementById("family-size");
+        const familySizeLabel = document.getElementById("family-size-label");
         const membersContainer = document.getElementById("members-container");
         const leaderSelect = document.getElementById("leader-index");
         const attendeeSection = document.getElementById("attendee-section");
+        const waveSelect = document.getElementById("wave");
 
         const packageNames = {
             SOLO: "Solo",
+            COUPLE: "Couple",
+            FAMILY3: "Family of 3",
+            FAMILY4: "Family of 4",
             GROUP5: "Group of 5",
             GROUP10: "Group of 10"
         };
 
         const packageSizes = {
             SOLO: 1,
+            COUPLE: 2,
+            FAMILY3: 3,
+            FAMILY4: 4,
             GROUP5: 5,
             GROUP10: 10
         };
 
+        const pricingElement = document.getElementById("package-pricing-data");
+        let packagePricing = [];
+
+        try {
+            packagePricing = JSON.parse(pricingElement?.textContent || "[]");
+        } catch (error) {
+            console.error("Could not read package pricing data.", error);
+        }
+
         const money = value =>
             "KES " + Number(value).toLocaleString("en-KE");
 
+        function selectedPackageCode() {
+            if (packageSelect.value === "FAMILY") {
+                return "FAMILY" + (familySizeSelect?.value || "3");
+            }
+            return packageSelect.value;
+        }
+
+        function selectedQuantity() {
+            return packageSizes[selectedPackageCode()] || 0;
+        }
+
         function renderMembers() {
+            const isFamily = packageSelect.value === "FAMILY";
+
+            if (familySizeLabel) {
+                familySizeLabel.hidden = !isFamily;
+            }
+
             if (!packageSelect.value) {
                 attendeeSection.hidden = true;
                 membersContainer.replaceChildren();
                 leaderSelect.replaceChildren();
+                updateSummary();
                 return;
             }
-            attendeeSection.hidden = false;
-            const count = packageSizes[packageSelect.value];
 
-            membersContainer.innerHTML = "";
-            leaderSelect.innerHTML = "";
+            const count = selectedQuantity();
+
+            if (!count) {
+                attendeeSection.hidden = true;
+                return;
+            }
+
+            attendeeSection.hidden = false;
+            membersContainer.replaceChildren();
+            leaderSelect.replaceChildren();
 
             for (let i = 0; i < count; i++) {
                 const section = document.createElement("section");
@@ -70,15 +112,14 @@ document.addEventListener("DOMContentLoaded", () => {
             updateSummary();
         }
 
-        const waveSelect = document.getElementById("wave");
-
         function updateSummary() {
-            const count = packageSizes[packageSelect.value] || 1;
+            const packageCode = selectedPackageCode();
+            const count = selectedQuantity();
             const selected = form.querySelector(
                 'input[name="category"]:checked'
             );
 
-            const selectedWave = waveSelect ? waveSelect.value : "";
+            const selectedWave = waveSelect ? waveSelect.value : "LEGACY";
             const priceFor = input => {
                 if (!input) return "";
                 if (!waveSelect) return input.dataset.price || "";
@@ -88,22 +129,55 @@ document.addEventListener("DOMContentLoaded", () => {
             };
 
             const priceValue = priceFor(selected);
-            const hasPrice = priceValue !== "" &&
+            const hasBasePrice = priceValue !== "" &&
                 Number.isFinite(Number(priceValue));
-            const unit = hasPrice ? Number(priceValue) : 0;
-            const discount = Math.max(0, (count - 1) * 200);
-            const total = Math.max(0, (unit * count) - discount);
+
+            const unit = hasBasePrice ? Number(priceValue) : 0;
+            const baseTotal = unit * count;
+
+            const rule = packagePricing.find(item =>
+                item.category_code === selected?.value &&
+                item.wave === selectedWave &&
+                item.package_code === packageCode
+            );
+
+            const configured = Boolean(
+                rule && (
+                    rule.package_price !== null ||
+                    rule.discount_amount !== null
+                )
+            );
+
+            let discount = 0;
+            let total = 0;
+
+            if (configured && hasBasePrice) {
+                if (rule.package_price !== null) {
+                    total = Number(rule.package_price);
+                    discount = Math.max(0, baseTotal - total);
+                } else {
+                    discount = Math.min(
+                        Number(rule.discount_amount),
+                        baseTotal
+                    );
+                    total = baseTotal - discount;
+                }
+            }
 
             document.getElementById("package-summary").textContent =
-                packageNames[packageSelect.value] || "Solo";
+                packageNames[packageCode] || "Choose package";
 
-            document.getElementById("quantity-summary").textContent = count;
+            document.getElementById("quantity-summary").textContent =
+                count || "—";
+
             document.getElementById("unit-price").textContent =
-                hasPrice ? money(unit) : "Price pending";
+                hasBasePrice ? money(unit) : "Price pending";
+
             document.getElementById("discount-price").textContent =
-                money(discount);
+                configured && hasBasePrice ? money(discount) : "Not configured";
+
             document.getElementById("total-price").textContent =
-                hasPrice ? money(total) : "Price pending";
+                configured && hasBasePrice ? money(total) : "Price pending";
 
             form.querySelectorAll('input[name="category"]').forEach(input => {
                 const label = input.closest(".ticket-option");
@@ -122,6 +196,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
         packageSelect.addEventListener("change", renderMembers);
 
+        if (familySizeSelect) {
+            familySizeSelect.addEventListener("change", renderMembers);
+        }
+
         form.querySelectorAll('input[name="category"]').forEach(input => {
             input.addEventListener("change", updateSummary);
         });
@@ -131,7 +209,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         updateSummary();
-
     }
 
     // Group-aware QR scanner.
